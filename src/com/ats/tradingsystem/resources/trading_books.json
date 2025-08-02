@@ -1,0 +1,18 @@
+[
+  {
+    "id": "TB001",
+    "tradingBookCode": "OIS-TRADES",
+    "name": "OIS Trading Book",
+    "enabled": true,
+    "restricted": false,
+    "version": 1
+  },
+  {
+    "id": "TB002",
+    "tradingBookCode": "LOANS-TRADES",
+    "name": "Loans Trading Book",
+    "enabled": true,
+    "restricted": true,
+    "version": 1
+  }
+]

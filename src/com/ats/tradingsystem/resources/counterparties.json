@@ -1,0 +1,48 @@
+[
+  {
+    "counterpartyId": "CP001",
+    "counterpartyCode": "ALPHA-SEC",
+    "name": "Alpha Securities Ltd.",
+    "enabled": true,
+    "bank": false,
+    "cifReference": "CIF-1001",
+    "osdNumber": "OSD-901",
+    "country": "South Africa",
+    "rating": "A",
+    "sector": "Broker",
+    "location": "LONDON-OFFICE",
+    "locationId": "LOC001",
+    "resident": true,
+    "standardBank": false,
+    "tradingBookIds": ["OIS-TRADES", "LOANS-TRADES"],
+    "roles": [
+      {
+        "roleCode": "PRIMARY",
+        "description": "Primary Trading Counterparty"
+      }
+    ]
+  },
+  {
+    "counterpartyId": "CP002",
+    "counterpartyCode": "OMEGA-FIN",
+    "name": "Omega Financial Corp.",
+    "enabled": true,
+    "bank": true,
+    "cifReference": "CIF-2002",
+    "osdNumber": "OSD-801",
+    "country": "USA",
+    "rating": "AA",
+    "sector": "Bank",
+    "location": "NYC-OFFICE",
+    "locationId": "LOC002",
+    "resident": false,
+    "standardBank": true,
+    "tradingBookIds": ["OIS-TRADES"],
+    "roles": [
+      {
+        "roleCode": "CLEARING",
+        "description": "Clearing Bank"
+      }
+    ]
+  }
+]
