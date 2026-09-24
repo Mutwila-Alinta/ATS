@@ -1,86 +1,103 @@
-# Nex — Technical Architecture & MVP Delivery Plan
+# Nex (ATS Capital Markets) — Technical Architecture & MVP Delivery Plan
 
 | | |
 |---|---|
-| **Document** | Nex technical guide: target architecture, environments, CI/CD, MVP sprint plan, pilot plan |
-| **Version** | v0.2 (24 Sep 2026). Replaces v0.1 |
+| **Document** | Technical guide: current state, target architecture, environments, CI/CD, MVP sprint plan, pilot plan |
+| **Version** | v0.3 (24 Sep 2026). Replaces v0.2, which was based on the wrong repository |
+| **Codebase** | [`Alintatech-Solutions/ats-capital-markets-app`](https://github.com/Alintatech-Solutions/ats-capital-markets-app), `main` @ `805753b` |
 | **Audience** | Developers, tech lead, DevOps, QA |
-| **Source inputs** | *ATS Trading Platform — Investor Business Plan V1.0*; the `ATS` repository; product direction from the founders (24 Sep 2026) |
+| **Inputs** | *ATS Trading Platform — Investor Business Plan V1.0*; the repository above, including `CLAUDE.md`, `docs/AI_CONTEXT.md`, `docs/PLATFORM_STATE.md` and `docs/FRONTEND_UI_APP_SHELL.md`; product direction from the founders (24 Sep 2026) |
 | **Status** | Draft for engineering review |
 
 ---
 
-## 0. What changed in v0.2
+## 0. What changed in v0.3
 
-| Topic | v0.1 | **v0.2 (this document)** |
+v0.1 and v0.2 were written against `Mutwila-Alinta/ATS`, an early Java prototype. This version is based on the actual application, **`ats-capital-markets-app`**. That app is far more advanced, so the plan changes from *building* the MVP to *hardening, splitting and moving* a working application.
+
+| Topic | v0.2 | **v0.3** |
 |---|---|---|
-| MVP date | April 2027 | **MVP built and released by 18 Dec 2026** |
-| Pilot | May–Aug 2027 | **Pilot onboarding and feedback: Jan–Apr 2027** |
-| MVP scope | New FX/OIS product scope | **Keep current functionality** and make it work end to end on real services |
-| Back-end style | Modular monolith first | **Microservices core engine** (a small, right-sized set of services) |
-| Runtime | Managed containers on a cloud to be chosen | **Docker first** (Docker Compose), then **AWS** (ECS Fargate, RDS, S3/CloudFront) |
-| UI | New React build replacing JavaFX | **Existing React UI stays largely unchanged**; work is limited to performance and look-and-feel. JavaFX is out of scope |
-| Code baseline | Fix compile errors | **Code that doesn't compile is being removed** by the team; we build on what compiles |
-| Audience | Founders, investors, engineers | **Technical / developers** |
+| Starting point | Prototype pricing classes, no services | A working full-stack app: 9 UI modules, 17 priced product types, curve bootstrapping, risk, scenarios, reporting batches, RBAC, K8s/GitOps deployment |
+| Build | Gradle | **Maven** (keep, as the repo requires) |
+| Microservices | 4 new services built from scratch | **Split the existing monolith** into 3 services along existing package boundaries (strangler pattern) |
+| AWS runtime | ECS Fargate | **EKS + ArgoCD**, which keeps the repo's mandated Jenkins → registry → GitOps → ArgoCD flow and reuses the Kustomize manifests |
+| CI/CD | New GitHub Actions | **Extend the existing Jenkins pipelines** (`Jenkinsfile`, `Jenkinsfile.aws`) |
+| UI | Wire an assumed React app | The **existing React app is kept**; work is limited to performance, code health and look & feel |
+| Dates | MVP 18 Dec 2026; pilot Jan–Apr 2027 | **Unchanged** |
 
 ---
 
 ## 1. Summary for developers
 
-- **Goal:** by **18 Dec 2026**, ship Nex **v1.0.0 (MVP)**. It keeps the current functional scope (trade capture for OIS, bonds and loans; market data; valuation, cashflows and P&L; reports), now running as **containerised Java microservices** behind the existing **React** UI. Every change goes through an automated **build → test → security scan → deploy** pipeline.
-- **Where it runs:** first **Docker Compose** (developer machines and CI), then **AWS** (`af-south-1`, Cape Town): ECS Fargate, RDS PostgreSQL, ALB, CloudFront/S3, Secrets Manager, all built with Terraform.
-- **Services (MVP):** `api-gateway`, `refdata-service`, `trade-service`, `marketdata-service` and `pricing-service` (the core valuation engine, using the `nex-quant` library), plus `web` (React), `keycloak` (identity) and `postgres`.
-- **Data:** a single PostgreSQL cluster with **one schema and one DB user per service**, and Flyway migrations owned by each service.
-- **Timeline:** six 2-week sprints (S0–S5), **28 Sep → 18 Dec 2026**. Change freeze over the holidays. **Pilot from 11 Jan to 30 Apr 2027.**
-- **Reality check:** 12 weeks is tight. The date holds only if (a) the scope stays at *current functionality*, (b) the team has about 4–6 engineers from Sprint 0, and (c) stretch items are cut before hardening work (§8.4).
+- **MVP (v1.0.0, 18 Dec 2026)** is today's functionality, made secure, durable and scalable. The work:
+  - real Keycloak authentication in place of the auth bypass
+  - no in-memory state across replicas
+  - a real EOD run in place of the simulated one
+  - Flyway-owned schema
+  - reports stored in S3
+  - the back end split into three services: `core-api`, `pricing-engine` and `batch-reporting`
+
+  It runs on Docker Compose and on **AWS dev (EKS, af-south-1)**, deployed by Jenkins → ECR → GitOps → ArgoCD, with automated tests and security gates.
+- **The UI stays as it is.** Work covers pinned dependencies, code splitting, breaking up the two very large components, lint and tests, and look-and-feel polish.
+- **Pilot:** 11 Jan – 30 Apr 2027, on a dedicated AWS pilot environment.
+- **Reality check:** the application logic largely exists, so a 12-week window is achievable. The risk sits in the security, state and EOD fixes and in the AWS platform work. §8.4 lists what to cut if needed.
 
 ---
 
-## 2. Baseline and assumptions
+## 2. Current state (verified 24 Sep 2026)
 
-### 2.1 Baseline after the cleanup
+### 2.1 What exists
 
-| Asset | State going into Sprint 0 |
+| Area | What's there |
 |---|---|
-| **Java quant foundations** (`com.ats.pricing.tools`, `com.ats.math.numeric`, most of `com.ats.pricing.foundation`, enums) | Compiling code is kept: day counts (Act/360, Act/365, Act/Act ISDA, 30/360 US), Modified Following, date intervals, `BusinessCenter`, `Currency`, `Payment`, linear interpolation, tenor parsing. **No tests yet** |
-| **Prototype OIS valuation** (`ats.FixedLeg`, `FloatingLeg`, `HistoricalFloatingLeg`, curves, loaders) | Logic is kept as a reference and re-implemented in `nex-quant` and `pricing-service` with tests |
-| **Code that doesn't compile** (`OvernightIndexSwap`, `InterestRateCurve`, parts of `CashFlow`/`ReferenceTimePeriod`, JavaFX UI) | **Removed by the team.** Where the MVP needs the capability, it is rebuilt in Sprints 1–3 (see §4.8) |
-| **React UI** | Exists and stays. Screens: Trade Capture (OIS/Bond/Loan tickets), Market Data, Reports, and the valuation/cashflow/P&L actions. It is wired to the new APIs in the sprints |
-| **Reference/sample data** (`counterparties.json`, `trading_books.json`, holidays, SOFR fixings) | Becomes Flyway seed data after fixing formats (ISO dates, unquoted CSV) |
-| **Build, services, database, CI, containers** | Not present; created in Sprint 0 |
+| **Repository layout** | `backend/` (Spring Boot), `frontend/` (React/Vite), `docker-compose.yml` (postgres, redis, backend, frontend), `apps/ats-capital-markets/` (Kustomize base + `devops-pipeline` overlay), `infrastructure/argocd/`, `Jenkinsfile` (GHCR + GitOps + PR previews), `Jenkinsfile.aws` (build and push to ECR), `.github/workflows/pr-preview-cleanup.yml`, `docs/` |
+| **Back end** | Java 21, Spring Boot 3.3.5, Maven; about 25.5k lines. Uses Web, Data JPA, Batch, Redis, Security + OAuth2 resource server, WebSocket (STOMP), Flyway, Apache POI. Also has H2 for local runs |
+| **Back-end packages** | `trade`, `refdata`, `market` (curves, snapshots, environments, fixings, OIS curve stripping, bootstrap), `pricing` (products, foundation, tools), `risk`, `scenario`, `simulation`, `reporting` (definitions, batches with DAG edges, executions, schedules, CSV output), `batch`, `security` (users, 20 roles, 60 permissions), `workspace` |
+| **Pricing coverage** (`TicketValuationManager` implementations) | OIS swap, term swap, IRS swap, bond, bond forward, credit note (incl. z-spread solver and PD term structures), deposit, FX forward, FX swap, equity future, IRS future, listed option, OTC option, TRS |
+| **Market data** | Curves and nodes, snapshots per date and environment, OIS swap curve definitions with stripping conventions, curve bootstrapping, index fixings, fixing-to-curve mappings, CSV import (preview/commit). Distributed cache: Postgres → Redis → an immutable context held in the JVM |
+| **Trade lifecycle** | Draft → Pending Approval → Trader Confirmed / Amended / Cancelled; book, amend, cancel, submit-for-approval, approve; portfolio–counterparty gate |
+| **Front end** | React (unpinned `latest`), Vite 8, TypeScript, Tailwind 3, zustand, oidc-client-ts (Keycloak PKCE), STOMP risk socket worker, exceljs. About 17k lines. **9 modules:** Trade Capture, Trade Blotter, Market Data, Valuation, Risk, Operations, Reporting, Reference Data, User Management. Dark "terminal" theme and fixed app shell (`docs/FRONTEND_UI_APP_SHELL.md`) |
+| **Database** | PostgreSQL 16 with 30 JPA tables. Flyway has `V1__reporting_module`, `V2` (Postgres-only backfill) and `V3__add_ois_curve_stripping_conventions`; **all other tables are created by Hibernate `ddl-auto: update`** |
+| **Deployment today** | Jenkins → GHCR → GitOps repo → ArgoCD → Rancher RKE2. Includes per-PR preview namespaces, Vault + External Secrets Operator, Cloudflare Tunnel, Traefik ingress. `Jenkinsfile.aws` builds and pushes images to ECR in `af-south-1`, but has no deploy stage |
+| **Tests** | **Back end: 21 suites, 83 tests, all passing** (`mvn test`, run 24 Sep). **Front end: builds** (`tsc -b && vite build`) with **no tests or lint**. Main bundle 810 KB (185 KB gzipped), exceljs chunk 930 KB |
 
-### 2.2 Assumptions
+### 2.2 Gaps that block a pilot (verified in code)
 
-1. The team is about 4–6 engineers (see §11). One engineer is comfortable with rates maths, and one covers DevOps at least part-time.
-2. The React app will be moved into this repository under `nex-web/` in Sprint 0, if it currently lives elsewhere.
-3. An AWS account (or AWS Organization) with **af-south-1 enabled** is available by Sprint 3. af-south-1 is an opt-in region.
-4. The pilot client supplies sample trades, market data and their current P&L/cashflow output by mid-November 2026, for use as acceptance fixtures.
+| # | Gap | Evidence | Fix (sprint) |
+|---|---|---|---|
+| G1 | **Authentication is bypassed** | `SecurityConfig.TEMPORARY_AUTH_BYPASS = true` lets anyone call `/api/**`. The OAuth2 resource-server auto-config is excluded in `application.yml`. Dev-login tokens live in an in-memory map (`DevSessionRegistry`) | Turn on Keycloak JWT validation; keep dev login only under the `local` profile (S1) |
+| G2 | **In-memory state with 2 replicas** | `backend-deployment.yaml` sets `replicas: 2`. State is held in `ConcurrentHashMap`s in `DevSessionRegistry`, `RiskEngineService.jobs`, `BatchController.progress` and `SpringDynamicSchedulerService`. As a result, sessions and jobs are lost between pods, and **scheduled report batches fire on every replica** | Redis for job/session state; ShedLock for schedules (S1) |
+| G3 | **EOD run is simulated** | `BatchController` just loops 0→100% with `Thread.sleep` | Real Spring Batch EOD job (S3) |
+| G4 | **Schema not owned by migrations** | `ddl-auto: update` (default) vs `validate` (prod). Flyway covers only reporting and conventions, so there is no reproducible way to create a production database | Flyway baseline migration for the full schema; `validate` everywhere except local H2 (S0) |
+| G5 | **Report files on local disk** | `LocalFileStorageService` writes to `./report-output`, which is lost on pod restart and not shared between replicas | S3-backed `FileStorageService` (MinIO locally) (S1) |
+| G6 | **No security scanning; weak AWS pipeline** | No SAST, dependency, secret or image scanning in `Jenkinsfile`. `Jenkinsfile.aws` uses static AWS keys (`ats-dev-aws-credentials`) and pushes a mutable `latest` tag | Add scanning stages; IAM role; immutable tags (S0–S4) |
+| G7 | **Front-end maintainability** | Unpinned `latest` for react, typescript, zustand and vite plugin. `TradingWorkstation.tsx` has 4,374 lines; `MdcmModule.tsx` has 2,603. No code splitting. Leftover `srcFE16Jul/` folder and zip, `dump_xlsx_tmp.cjs`; sample instruments hard-coded in `App.tsx` | §7 (S0, S4) |
+| G8 | **Observability** | No Spring Actuator (custom `HealthController`). `System.out.println` in the pricing path. No metrics or traces | Actuator, Micrometer, JSON logs, OpenTelemetry (S0) |
+| G9 | **Code hygiene** | Placeholder formulas in `PricingService.value` (`/api/pricing/value`) next to the real ticket pricers. `.txt` files and sample JSON/CSV in `src/main/java`. A stray `com.alinta...` package. A `Test2` file at the root | Remove or relocate (S0) |
+
+### 2.3 Repository rules this plan respects
+
+`CLAUDE.md` and `docs/AI_CONTEXT.md` require: **Maven** (not Gradle); the Jenkins → image registry → GitOps → ArgoCD deployment flow; no manual `kubectl`/Helm on shared environments; secrets through Vault/External Secrets only; and every platform change recorded in `docs/PLATFORM_STATE.md`. The AWS move below keeps the same flow and swaps only its components: ECR for GHCR, EKS for RKE2, and AWS Secrets Manager behind External Secrets as another secret store.
 
 ---
 
 ## 3. MVP functional scope — "keep current functionality"
 
-The MVP makes the existing screens and actions real: persisted, validated, priced, audited and exportable.
+All nine modules and all current products stay. The MVP makes them production-grade.
 
-| # | Feature (current UI) | Today | MVP deliverable | Owner service |
-|---|---|---|---|---|
-| F1 | **Login / user identity** | Hard-coded user | OIDC login (Keycloak), roles: `TRADER`, `MIDDLE_OFFICE`, `RISK`, `ADMIN`, `AUDITOR` | keycloak, api-gateway |
-| F2 | **Trade Capture — header** (trade ID, status, source system, capture date, trader, portfolio/book, counterparty, units, buy/sell, currency, funding status, CSA type, risk definition) | Form only | Validated, persisted **trade header**; server-generated trade ID; dropdowns fed from reference data | trade-service, refdata-service |
-| F3 | **OIS ticket** (start/maturity, tenor, payment frequency, payment/fixing lag, floating index, spread, day counts, business centre, roll direction, stub, notional, fixed rate) | Form only | Persisted OIS economics with validation (calendar-adjusted dates, tenor → maturity) | trade-service |
-| F4 | **Bond ticket** (effective/maturity, ISIN, coupon, face value) | Form only | Persisted fixed-rate bond economics | trade-service |
-| F5 | **Loan ticket** (effective/maturity, loan type, rate, drawdown schedule) | Form only | Persisted fixed-rate loan/deposit with a simple drawdown schedule | trade-service |
-| F6 | **Preview / Save / Amend / Cancel** | Preview dialog; Save is a no-op | Save as a version; amend creates version + 1; cancel with reason; full history | trade-service |
-| F7 | **Trade blotter** | – | List/filter/sort trades by book, counterparty, product, status, date | trade-service |
-| F8 | **Market Data** tab | Placeholder | Upload and view discount curves (DFs or zero rates), fixings (SOFR, ZARONIA), FX rates and holiday calendars, stored as **snapshots per business date** | marketdata-service |
-| F9 | **Trade Valuation** | No-op button | PV per trade (OIS, bond, loan) for a chosen valuation date and snapshot | pricing-service |
-| F10 | **Future Cashflows** | Placeholder | Projected cashflow schedule per leg (dates, accrual, rate, amount, DF, PV) | pricing-service |
-| F11 | **Realized Cashflows** | Placeholder | Settled cashflows up to the valuation date, using historical fixings | pricing-service |
-| F12 | **Trade P&L** | Placeholder | Daily P&L = ΔPV + realised cashflows; per trade and per book | pricing-service |
-| F13 | **Reports** tab (Summary, Export) | Placeholder | Blotter, positions/PV by book, cashflow ladder and P&L reports; export to **CSV/XLSX** (PDF is a stretch) | pricing-service |
-| F14 | **Audit trail** | – | Every create/amend/cancel/upload/valuation-run is recorded with user, time, before and after values | all services (shared lib) |
-| F15 | **EOD run** | – | A button or schedule that revalues all live trades for a business date and stores the results | pricing-service |
+| Module (UI) | Keeps | MVP hardening |
+|---|---|---|
+| **Trade Capture** | Tickets for all 17 product types; live valuation, expected and realised cashflows from the ticket | Calls go to `pricing-engine`; valuation audit stored; `System.out` replaced with structured logs |
+| **Trade Blotter** | Blotter, amend, cancel, approve, copy | Authorisation checks on every action; append-only **trade version/audit history** (new) |
+| **Market Data** | Curves, snapshots, environments, OIS curve stripping, bootstrap, fixings, CSV import | Maker-checker roles enforced (`MARKET_DATA_MAKER/CHECKER` already exist); cache invalidation across services through Redis |
+| **Valuation** | Portfolio valuation views | Backed by persisted EOD results as well as ad-hoc runs |
+| **Risk** | Risk engine jobs (DV01 etc.) and WebSocket updates | Job state in Redis, so any replica can serve status; runs in `pricing-engine` |
+| **Operations** | EOD trigger and progress | **Real EOD run** (§4.7) with progress from Spring Batch metadata |
+| **Reporting** | Definitions, batches with dependency edges, schedules, execution history, CSV reports (EOD valuations, expected/realised cashflows, positions, blotter, valuation attribution) | Runs in `batch-reporting`; runs once per schedule (ShedLock); output to S3 |
+| **Reference Data** | Counterparties, roles, portfolios and links, holiday calendars, credit ratings/PD points, audit log | Unchanged; the audit log is extended to trades |
+| **User Management** | Users and roles (20 roles, 60 permissions) | Users come from **Keycloak**; roles map to the existing RBAC permission codes |
 
-**Out of MVP scope** (Beta and later): new asset classes (FX, equities, IRS vs JIBAR, options), VaR/Greeks beyond DV01, limits, SWIFT/FIX, live vendor feeds, pooled multi-tenancy, event streaming, AI/RPA.
+**Out of MVP scope:** new asset classes, new risk measures, SWIFT/FIX, vendor market-data feeds, pooled multi-tenancy, AI/RPA modules.
 
 ---
 
@@ -88,562 +105,274 @@ The MVP makes the existing screens and actions real: persisted, validated, price
 
 ### 4.1 Principles
 
-1. **Right-sized microservices.** Four domain services, split along business boundaries. Each service has its own schema, and services never read each other's tables.
-2. **Pricing maths lives in a library.** `nex-quant` is plain Java with no Spring, HTTP or database dependencies. `pricing-service` is a thin shell around it.
-3. **Contract-first APIs.** Every service publishes an OpenAPI 3.1 spec. The React UI's TypeScript client is generated from these specs.
-4. **Stateless containers.** All state lives in PostgreSQL and S3, and configuration comes from environment variables and secrets. The same image runs in Compose and on ECS.
-5. **Immutable trade versions and an audit log.** Rows are never updated in place for business data.
-6. **Tenant-ready.** `tenant_id` is on every table from day one, even though the pilot runs on a dedicated environment.
-7. **Security and observability in the skeleton.** OIDC, TLS at the edge, structured JSON logs, health endpoints and metrics come in Sprint 0, not later.
+1. **Split the monolith along existing package boundaries.** Carve out services where there is a clear operational reason (scaling or isolation). Don't rewrite working pricing code.
+2. **The pricing library is plain Java.** `quant-lib` holds the `pricing/*` foundation, tools, market-data maths and per-product calculators, with no Spring or database dependencies. That keeps it testable and reusable by any service.
+3. **Stateless services.** All state lives in PostgreSQL, Redis and S3, so any replica can serve any request.
+4. **One deployment flow everywhere.** Jenkins builds, tests and scans; pushes images; updates GitOps; ArgoCD deploys. Docker Compose is for local development and CI end-to-end tests only.
+5. **Security and audit by default.** Keycloak JWT on every call, and an audit trail for trades, reference data and market data.
 
-### 4.2 Service landscape
+### 4.2 Service split (MVP)
+
+| Service | Built from (current packages) | Responsibilities | State | Scales on |
+|---|---|---|---|---|
+| **`core-api`** | `trade`, `refdata`, `market` (management), `security`, `workspace`, `scenario`, `simulation` | Trade booking and lifecycle, reference data, market-data CRUD/import/bootstrap/snapshots, users and RBAC, workspace layouts, scenario capture | PostgreSQL schema `core`; publishes market contexts to Redis | API traffic |
+| **`pricing-engine`** | `pricing/*` (via `quant-lib`), `risk`, `market` read-side (`ImmutableMarketDataContext`, caches) | Ticket valuation, expected and realised cashflows, risk jobs, and valuation for EOD workers | **Stateless.** Market context read from Redis (populated by `core-api`) with a fallback to `core-api`'s internal snapshot API | CPU (HPA) |
+| **`batch-reporting`** | `reporting/*`, `batch` | Report definitions, batches, schedules, executions; **EOD job**; files to S3 | PostgreSQL schema `reporting` + Spring Batch metadata; S3 | Scheduled load |
+| **`frontend`** | `frontend/` | React SPA via nginx | – | – |
+
+Routing needs no separate API gateway. In Docker, the frontend's nginx splits `/api/*` by path. On Kubernetes, ingress rules do the same:
+
+| Path prefix | Service |
+|---|---|
+| `/api/pricing/**`, `/api/risk/**`, `/ws/**` (risk socket) | `pricing-engine` |
+| `/api/reporting/**`, `/api/batch/**` | `batch-reporting` |
+| everything else under `/api/**` | `core-api` |
+
+**After the pilot** (candidates, not MVP): split `market-data-service` and `refdata-service` out of `core-api`, and add an event bus (SNS/SQS or MSK) for trade and market-data events.
 
 ```mermaid
 flowchart LR
-  U[Browser<br/>React UI] --> WEB[web<br/>nginx + React build]
-  U -->|OIDC login| KC[keycloak]
-  WEB -->|/api/*| GW[api-gateway<br/>Spring Cloud Gateway<br/>JWT validation, routing]
-  GW --> RD[refdata-service]
-  GW --> TR[trade-service]
-  GW --> MD[marketdata-service]
-  GW --> PR[pricing-service<br/>core engine + nex-quant]
-  PR -->|REST: trades| TR
-  PR -->|REST: snapshots| MD
-  PR -->|REST: calendars, indices| RD
-  TR -->|REST: validate refs| RD
-  RD --> DB[(PostgreSQL<br/>schema per service)]
-  TR --> DB
-  MD --> DB
-  PR --> DB
-  MD --> S3[(Object storage<br/>uploads)]
-  PR --> S3b[(Object storage<br/>reports)]
+  B[Browser<br/>React UI] -->|OIDC PKCE| KC[Keycloak<br/>auth.alintatechsolutions.co.za]
+  B --> IN[Ingress / nginx<br/>path routing]
+  IN -->|/api/pricing, /api/risk, /ws| PE[pricing-engine<br/>stateless, quant-lib]
+  IN -->|/api/reporting, /api/batch| BR[batch-reporting<br/>EOD + reports]
+  IN -->|/api/*| CA[core-api<br/>trades, refdata, market data, RBAC]
+  CA --> PG[(PostgreSQL<br/>schemas: core, reporting)]
+  BR --> PG
+  CA -->|publish market context| R[(Redis)]
+  PE -->|read market context, job state| R
+  BR -->|value trades| PE
+  BR -->|read trades, snapshots| CA
+  BR --> S3[(S3 / MinIO<br/>report files)]
 ```
 
-| Service | Responsibility | Owns (schema) | Depends on |
-|---|---|---|---|
-| **web** | Serves the React build (nginx in Docker; S3 + CloudFront on AWS) | – | api-gateway, keycloak |
-| **api-gateway** | Single entry point `/api/**`; validates JWTs; routes to services; CORS; rate limiting; request IDs | – | keycloak (JWKS) |
-| **keycloak** | Users, roles, OIDC tokens for the UI (Authorization Code + PKCE) | `keycloak` | postgres |
-| **refdata-service** | Counterparties, trading books/portfolios, currencies, business centres, holiday calendars, rate indices, enum lists for UI dropdowns | `refdata` | – |
-| **trade-service** | Trade header and economics (OIS, Bond, Loan), versioning, lifecycle, blotter queries, trade audit | `trade` | refdata-service |
-| **marketdata-service** | Upload, validation and storage of curves, fixings and FX; snapshots per business date | `marketdata` | S3 |
-| **pricing-service** | **Core engine:** schedule and cashflow generation, valuation, realised/projected cashflows, P&L, EOD batch, report generation | `pricing` | trade, marketdata, refdata, S3 |
-
-**Service-to-service calls.** These use synchronous REST for the MVP, with generated clients, timeouts, retries and circuit breakers via Resilience4j. Internal calls carry a **service JWT**: the client-credentials grant from Keycloak. Event streaming (SNS/SQS or MSK) is deferred to Beta.
-
-### 4.3 Repository layout (monorepo)
+### 4.3 Maven multi-module layout
 
 ```
-ATS/
-├── settings.gradle.kts            # includes all JVM modules
-├── build-logic/                   # Gradle convention plugins (java, spring-service, quality)
-├── libs/
-│   ├── nex-quant/                 # pure Java: conventions, calendars, schedules, curves, pricers
-│   ├── nex-common/                # shared: error model, audit (AOP), tenant context, security config
-│   └── nex-api/                   # OpenAPI specs (*.yaml) + generated Java clients
-├── services/
-│   ├── api-gateway/
-│   ├── refdata-service/
-│   ├── trade-service/
-│   ├── marketdata-service/
-│   └── pricing-service/
-├── nex-web/                       # React app (Vite + TypeScript)
-├── deploy/
-│   ├── docker/                    # docker-compose.yml, .env.example, keycloak realm export, seed data
-│   └── terraform/                 # AWS: modules/ + envs/{dev,pilot}
-├── .github/workflows/             # ci.yml, deploy-dev.yml, release.yml
-└── docs/                          # this document, ADRs (docs/adr), runbooks, API docs
+backend/
+├── pom.xml                      # parent (packaging=pom), dependencyManagement, plugins (Spotless, JaCoCo, dependency-check, CycloneDX)
+├── quant-lib/                   # pure Java: pricing/foundation, tools, math, marketData, instruments, per-product calculators
+├── platform-common/             # security (JWT → authorities), error model, audit, logging, OpenAPI config, Redis helpers
+├── core-api/                    # Spring Boot app (today's CapitalMarketsApplication, minus pricing, risk and reporting)
+├── pricing-engine/              # Spring Boot app: PricingController, RiskEngine, market-context readers
+└── batch-reporting/             # Spring Boot app: reporting/*, EOD Spring Batch job, S3 storage
 ```
 
-Package root: `com.ats.nex.<service>`. Keep the existing `com.ats.pricing.*` and `com.ats.math.*` packages inside `nex-quant` for the MVP, and rename after the pilot.
+**Migration approach (behaviour-preserving):**
+1. Create the parent POM and move today's code unchanged into `core-api`. The 83 tests must stay green.
+2. Move the `pricing` foundation, tools and calculators into `quant-lib`, and the shared security and error code into `platform-common`.
+3. Create `pricing-engine` and move `PricingController`, the `TicketValuationManager`s and `RiskEngine*` into it. In `core-api`, replace direct calls with a generated client.
+4. Create `batch-reporting` the same way, and delete the moved code from `core-api`.
 
-### 4.4 Technology stack
+Each step is its own PR with a preview environment, following the repo's workflow.
 
-| Layer | Choice | Notes |
-|---|---|---|
-| Language / runtime | **Java 21 (LTS)**, Eclipse Temurin base images | Existing code is Java 21 |
-| Service framework | **Spring Boot 3.x** (Web, Validation, Data JPA or JDBC, Actuator, Security OAuth2 Resource Server) | Most common stack; fast to hire for |
-| Gateway | **Spring Cloud Gateway** | Same stack as the services. On AWS it sits behind the ALB |
-| Build | **Gradle (Kotlin DSL)**, version catalog `gradle/libs.versions.toml`, dependency locking | Reproducible builds |
-| API contracts | **OpenAPI 3.1**, `openapi-generator` (Java clients), `openapi-typescript` / `orval` (React client) | Contract-first |
-| Resilience | **Resilience4j** | Timeouts, retries, circuit breakers |
-| Database | **PostgreSQL 16**; **Flyway** per service | RDS PostgreSQL on AWS |
-| Identity | **Keycloak 25+** (OIDC, MFA, SAML federation for banks) | The same product runs in Docker and on AWS. Amazon Cognito is the managed alternative |
-| Documents | **Apache POI** (XLSX), OpenPDF (PDF, stretch) | POI is already a project dependency |
-| Front-end | Existing **React + TypeScript** app | Improvements are listed in §7 |
-| Containers | **Docker**, images built with multi-stage Dockerfiles (or Jib) | Non-root user, read-only filesystem where possible |
-| Local runtime | **Docker Compose v2** | One command: `docker compose up` |
-| Cloud | **AWS af-south-1**: ECS Fargate, ECR, RDS, ALB, CloudFront, S3, Secrets Manager, KMS, CloudWatch, WAF | See §5.2 |
-| IaC | **Terraform ≥ 1.7** (S3 remote state with locking) | Modules per component |
-| CI/CD | **GitHub Actions**, AWS access through GitHub OIDC (no long-lived keys) | See §6 |
-| Observability | Spring Actuator + Micrometer → **CloudWatch** (metrics/logs); OpenTelemetry traces → **AWS X-Ray** | JSON logs with `traceId` and `tenantId` |
-| Testing | JUnit 5, AssertJ, **Testcontainers**, WireMock, Vitest, **Playwright**, QuantLib (golden values) | See §6.3 |
+### 4.4 Data architecture
 
-### 4.5 API surface (MVP)
+| Topic | Target |
+|---|---|
+| Schema ownership | Schema `core` (trades, OIS legs/schedules, refdata, market curves/snapshots/fixings/indices, credit ratings, users/roles/permissions, workspace) is owned by `core-api`. Schema `reporting` (`report_*`, `batch_edge`, `execution_history`, Spring Batch `BATCH_*`, `eod_valuation`, `eod_cashflow`) is owned by `batch-reporting`. `pricing-engine` has no database |
+| Migrations | **Flyway only.** Create `V0__baseline` per schema from the schema Hibernate generates today (review with `pg_dump --schema-only`, then commit). Existing databases use `baseline-on-migrate` at version 0. Set `ddl-auto: validate` in every profile except local H2 |
+| Trade audit (new) | Append-only `trade_version` (`trade_id`, `version`, `status`, full payload JSON, `changed_by`, `changed_at`, `reason`), written on book/amend/cancel/approve. The existing `refdata_audit_log` pattern is reused for market data |
+| EOD results (new) | `eod_run` (`run_id`, `business_date`, `snapshot_id`, `environment`, `status`, counts), `eod_valuation` (per trade: PV, currency, measures JSON), `eod_cashflow` (per trade and leg). Reports read from these tables instead of re-pricing |
+| Redis | Market-context cache (existing `DistributedMarketDataCache`), risk and EOD job state, dev sessions (local only), ShedLock locks (or JDBC ShedLock) |
+| Object storage | `FileStorageService` gets an `S3FileStorageService` (AWS SDK v2). MinIO in Compose, S3 on AWS; keys `reports/{date}/{executionId}/...` |
 
-All routes go through the gateway under `/api/v1`. Every response uses the shared error model `{code, message, details[], traceId}`.
+### 4.5 Security
 
-| Service | Endpoint | Purpose |
-|---|---|---|
-| refdata | `GET /refdata/counterparties`, `GET /refdata/books`, `GET /refdata/currencies`, `GET /refdata/indices`, `GET /refdata/calendars/{code}/holidays?from&to` | Dropdowns, calendars |
-| refdata | `POST/PUT /refdata/{entity}` (ADMIN), `POST /refdata/{entity}:import` (CSV) | Maintenance |
-| trade | `POST /trades` | Create a trade (header + `economics` by `productType` ∈ `OIS`, `BOND`, `LOAN`) |
-| trade | `GET /trades?book&counterparty&productType&status&from&to&page&size&sort` | Blotter |
-| trade | `GET /trades/{tradeId}`, `GET /trades/{tradeId}/versions` | Detail and history |
-| trade | `PUT /trades/{tradeId}` (with `If-Match: <version>`) | Amend; creates a new version |
-| trade | `POST /trades/{tradeId}:cancel` `{reason}` | Cancel |
-| trade | `POST /trades:preview` | Validate and derive dates without saving (Preview button) |
-| marketdata | `POST /marketdata/uploads` (multipart CSV/XLSX, `type` ∈ `DISCOUNT_CURVE`, `FIXINGS`, `FX`, `HOLIDAYS`) | Upload and validation report |
-| marketdata | `GET /marketdata/snapshots?businessDate`, `POST /marketdata/snapshots/{id}:seal` | Snapshots |
-| marketdata | `GET /marketdata/curves/{curveId}?snapshotId`, `GET /marketdata/fixings/{index}?from&to` | Consumed by pricing |
-| pricing | `POST /pricing/valuations` `{tradeIds[], valuationDate, snapshotId}` | PV (Trade Valuation button) |
-| pricing | `GET /pricing/trades/{tradeId}/cashflows?valuationDate&type=FUTURE\|REALIZED` | Cashflow buttons |
-| pricing | `GET /pricing/pnl?book&date` and `GET /pricing/trades/{tradeId}/pnl?date` | P&L |
-| pricing | `POST /pricing/eod-runs` `{businessDate}`, `GET /pricing/eod-runs/{runId}` | EOD batch and status |
-| pricing | `GET /pricing/reports/{reportType}?format=csv\|xlsx&...` | Reports / export |
+1. **Browser:** unchanged. oidc-client-ts runs Authorization Code + PKCE against Keycloak (`ats-capital-markets` realm, client `capital-markets-web`).
+2. **Services:** remove `TEMPORARY_AUTH_BYPASS` and stop excluding `OAuth2ResourceServerAutoConfiguration`. Enable `oauth2ResourceServer().jwt()`. The existing `keycloakRoleConverter` is extended to map Keycloak realm roles to the **20 existing role codes and 60 permission codes**, so the existing `@PreAuthorize` checks keep working.
+3. **Dev login:** `DevTokenAuthenticationFilter` and `/api/auth/login` load only under `@Profile("local")`.
+4. **Service to service:** `batch-reporting` → `pricing-engine` and `core-api` use a Keycloak client-credentials token with the existing `INTEGRATION_SERVICE_ACCOUNT` role.
+5. **Secrets:** Vault + External Secrets on RKE2 (today). On AWS, **AWS Secrets Manager + External Secrets** (`ClusterSecretStore/aws-secrets-manager`) with **IRSA**, so no static keys. Nothing secret in images or git.
+6. **Transport:** TLS at the ALB (ACM) or Cloudflare. Services are reachable only inside the cluster.
 
-### 4.6 Security flow
-
-1. **Browser:** the React app uses OIDC **Authorization Code + PKCE** against Keycloak (realm `nex`, client `nex-web`) and gets a short-lived access token (5 min) plus a refresh token.
-2. **Gateway:** validates the JWT signature using Keycloak's JWKS, checks `aud`/`iss`, and forwards `Authorization`, `X-Request-Id` and `X-Tenant-Id` (derived from a token claim).
-3. **Services:** each is an OAuth2 resource server with method-level role checks (`@PreAuthorize("hasRole('TRADER')")`). Services are never exposed publicly; on AWS they live in private subnets.
-4. **Service to service:** client-credentials tokens (`pricing-service` → `trade-service`) scoped to read-only roles.
-5. **Secrets:** `.env` files (git-ignored) in Docker; **AWS Secrets Manager** on ECS, injected as task secrets. Nothing secret lives in images or the repo.
-
-### 4.7 Database modelling
-
-**Rules:**
-- One PostgreSQL database `nex`, with schemas `refdata`, `trade`, `marketdata`, `pricing` and `keycloak`. Each service has its own DB user with rights only on its own schema.
-- Flyway migrations live in `services/<svc>/src/main/resources/db/migration`, named `V<yyyymmddHHMM>__description.sql`.
-- Every table has `tenant_id`, `created_at` and `created_by`. Business tables are append-only or versioned.
-- Money and rates use `NUMERIC(24,8)` for amounts and `NUMERIC(18,12)` for rates and DFs. Never use floating-point columns for stored values.
-
-**refdata:**
-
-```sql
-CREATE TABLE refdata.counterparty (
-  tenant_id       varchar(32)  NOT NULL,
-  counterparty_id varchar(32)  NOT NULL,
-  code            varchar(32)  NOT NULL,
-  name            varchar(200) NOT NULL,
-  country         varchar(64),
-  rating          varchar(8),
-  sector          varchar(64),
-  is_bank         boolean      NOT NULL DEFAULT false,
-  enabled         boolean      NOT NULL DEFAULT true,
-  created_at      timestamptz  NOT NULL DEFAULT now(),
-  created_by      varchar(64)  NOT NULL,
-  PRIMARY KEY (tenant_id, counterparty_id),
-  UNIQUE (tenant_id, code)
-);
-CREATE TABLE refdata.trading_book (
-  tenant_id varchar(32), book_id varchar(32), code varchar(32), name varchar(200),
-  restricted boolean NOT NULL DEFAULT false, enabled boolean NOT NULL DEFAULT true,
-  created_at timestamptz NOT NULL DEFAULT now(), created_by varchar(64) NOT NULL,
-  PRIMARY KEY (tenant_id, book_id)
-);
-CREATE TABLE refdata.business_centre (code varchar(8) PRIMARY KEY, name varchar(64), time_zone varchar(64), currency char(3));
-CREATE TABLE refdata.holiday (centre_code varchar(8) REFERENCES refdata.business_centre, holiday_date date,
-  PRIMARY KEY (centre_code, holiday_date));
-CREATE TABLE refdata.rate_index (index_code varchar(16) PRIMARY KEY, currency char(3), tenor varchar(8),
-  day_count varchar(16), centre_code varchar(8), publication_lag int);
-```
-
-**trade** (header columns are typed; product economics are JSONB, validated by the service against a JSON Schema per product):
-
-```sql
-CREATE TABLE trade.trade (
-  tenant_id        varchar(32)  NOT NULL,
-  trade_id         varchar(32)  NOT NULL,        -- server generated, e.g. NEX-000123
-  version          int          NOT NULL,
-  is_latest        boolean      NOT NULL,
-  status           varchar(16)  NOT NULL,        -- NEW, AMENDED, CANCELLED, MATURED
-  product_type     varchar(16)  NOT NULL,        -- OIS, BOND, LOAN
-  trade_date       date         NOT NULL,
-  capture_date     date         NOT NULL,
-  trader           varchar(64)  NOT NULL,
-  book_id          varchar(32)  NOT NULL,
-  counterparty_id  varchar(32)  NOT NULL,
-  buy_sell         varchar(4)   NOT NULL,
-  currency         char(3)      NOT NULL,
-  units            numeric(24,8) NOT NULL DEFAULT 1,
-  source_system    varchar(32),
-  funding_status   varchar(16),
-  csa_type         varchar(32),
-  risk_definition  varchar(16),
-  notes            text,
-  economics        jsonb        NOT NULL,
-  change_reason    text,
-  created_at       timestamptz  NOT NULL DEFAULT now(),
-  created_by       varchar(64)  NOT NULL,
-  PRIMARY KEY (tenant_id, trade_id, version)
-);
-CREATE UNIQUE INDEX ux_trade_latest ON trade.trade (tenant_id, trade_id) WHERE is_latest;
-CREATE INDEX ix_trade_blotter ON trade.trade (tenant_id, book_id, status, trade_date) WHERE is_latest;
-```
-
-Example `economics` for an OIS:
-
-```json
-{ "startDate": "2026-10-01", "maturityDate": "2031-10-01", "tenor": "5Y", "notional": 10000000,
-  "fixedRate": 0.0756, "fixedDayCount": "ACT_365F", "floatIndex": "ZARONIA", "spread": 0.002,
-  "floatDayCount": "ACT_365F", "paymentFrequency": "6M", "paymentLag": "2D", "fixingLag": "0D",
-  "businessCentres": ["ZAJO"], "businessDayConvention": "MODIFIED_FOLLOWING",
-  "rollDirection": "BACKWARD", "stubType": "SHORT", "payReceiveFixed": "PAY" }
-```
-
-**marketdata:**
-
-```sql
-CREATE TABLE marketdata.snapshot (tenant_id varchar(32), snapshot_id uuid, business_date date NOT NULL,
-  status varchar(8) NOT NULL,  -- OPEN, SEALED
-  created_at timestamptz NOT NULL DEFAULT now(), created_by varchar(64) NOT NULL,
-  PRIMARY KEY (tenant_id, snapshot_id));
-CREATE TABLE marketdata.curve_point (tenant_id varchar(32), snapshot_id uuid, curve_id varchar(32),
-  pillar_date date, value numeric(18,12) NOT NULL, value_type varchar(8) NOT NULL, -- DF, ZERO
-  PRIMARY KEY (tenant_id, snapshot_id, curve_id, pillar_date));
-CREATE TABLE marketdata.fixing (tenant_id varchar(32), index_code varchar(16), fixing_date date,
-  rate numeric(18,12) NOT NULL, source varchar(32), PRIMARY KEY (tenant_id, index_code, fixing_date));
-CREATE TABLE marketdata.fx_rate (tenant_id varchar(32), snapshot_id uuid, ccy_pair char(6),
-  rate numeric(18,10) NOT NULL, PRIMARY KEY (tenant_id, snapshot_id, ccy_pair));
-CREATE TABLE marketdata.upload (tenant_id varchar(32), upload_id uuid PRIMARY KEY, type varchar(16),
-  s3_key text, status varchar(16), errors jsonb, created_at timestamptz DEFAULT now(), created_by varchar(64));
-```
-
-**pricing:**
-
-```sql
-CREATE TABLE pricing.valuation_run (tenant_id varchar(32), run_id uuid PRIMARY KEY, run_type varchar(8), -- ADHOC, EOD
-  business_date date, snapshot_id uuid, status varchar(12), started_at timestamptz, finished_at timestamptz,
-  trades_total int, trades_failed int, created_by varchar(64));
-CREATE TABLE pricing.valuation_result (run_id uuid REFERENCES pricing.valuation_run, trade_id varchar(32),
-  trade_version int, pv numeric(24,8), pv_ccy char(3), dv01 numeric(24,8), error text,
-  PRIMARY KEY (run_id, trade_id));
-CREATE TABLE pricing.cashflow_result (run_id uuid, trade_id varchar(32), leg varchar(8), seq int,
-  accrual_start date, accrual_end date, payment_date date, rate numeric(18,12), amount numeric(24,8),
-  df numeric(18,12), pv numeric(24,8), realized boolean, PRIMARY KEY (run_id, trade_id, leg, seq));
-CREATE TABLE pricing.pnl_daily (tenant_id varchar(32), business_date date, trade_id varchar(32), book_id varchar(32),
-  pv_today numeric(24,8), pv_prev numeric(24,8), realized_cf numeric(24,8), pnl numeric(24,8), run_id uuid,
-  PRIMARY KEY (tenant_id, business_date, trade_id));
-```
-
-**Audit** (in every schema, written by the `nex-common` audit aspect):
-
-```sql
-CREATE TABLE <schema>.audit_log (id bigserial PRIMARY KEY, tenant_id varchar(32), ts timestamptz DEFAULT now(),
-  actor varchar(64), action varchar(32), entity varchar(32), entity_id varchar(64),
-  before jsonb, after jsonb, request_id varchar(64), prev_hash char(64), hash char(64));
-```
-
-### 4.8 Core engine: `nex-quant` and `pricing-service`
-
-```
-libs/nex-quant
-├── conventions/   DayCount (ACT_360, ACT_365F, ACT_ACT_ISDA, THIRTY_360_US), BusinessDayConvention, RollConvention
-├── calendar/      HolidayCalendar (from refdata), JointCalendar, BusinessCenter
-├── schedule/      ScheduleGenerator (start, end, frequency, stub, roll direction, lags) -> List<Period>
-├── curve/         DiscountCurve (interface), InterpolatedDiscountCurve (log-linear DF), FixingSeries
-├── product/       OisTrade, FixedRateBond, FixedRateLoan (immutable records built from trade economics)
-├── pricer/        Pricer<T>, OisPricer, BondPricer, LoanPricer -> ValuationResult{pv, cashflows[], dv01}
-└── pnl/           PnlCalculator (ΔPV + realised cashflows)
-```
-
-- **Kept from today's code:** day counts, Modified Following, interpolation, `BusinessCenter`, `Currency`, `Payment`, and tenor parsing. Each gets **golden tests** before it is reused.
-- **Rebuilt (these were removed because they didn't compile):**
-  - *OIS product and pricer:* the fixed leg plus a compounded-in-arrears floating leg. Realised periods use historical fixings; future periods use forward rates implied by the curve. This follows the prototype `FixedLeg` / `HistoricalFloatingLeg` logic, now with schedules, lags and calendars.
-  - *Discount curve:* built from uploaded DFs or zero rates, with log-linear interpolation on DFs.
-- **New:** `BondPricer` and `LoanPricer` discount fixed cashflows and principal (clean/dirty price and accrued interest for bonds). `dv01` comes from a +1 bp parallel bump-and-reprice.
-- **`pricing-service`** fetches the trade versions, snapshot curves, fixings and calendars; maps them to `nex-quant` objects; prices them in parallel (virtual threads); and stores the results. The EOD run is idempotent per `(business_date, snapshot_id)`.
-- **Accuracy gate:** PVs match QuantLib reference values within **0.01% of notional** (target 0.5 bp) for every product in the test suite.
-
-### 4.9 Key flow: Trade Valuation button
+### 4.6 Key flow: ticket valuation after the split
 
 ```mermaid
 sequenceDiagram
-  participant UI as React UI
-  participant GW as api-gateway
-  participant PR as pricing-service
-  participant TR as trade-service
-  participant MD as marketdata-service
-  participant RD as refdata-service
-  UI->>GW: POST /api/v1/pricing/valuations {tradeIds, valuationDate, snapshotId}
-  GW->>PR: forward (JWT validated)
-  PR->>TR: GET trades (latest versions)
-  PR->>MD: GET curves + fixings for snapshot
-  PR->>RD: GET holiday calendars
-  PR->>PR: nex-quant: schedule → cashflows → PV, DV01
-  PR->>PR: store valuation_run / results + audit
-  PR-->>UI: 200 {runId, results[]}
+  participant UI as React UI (Trade Capture)
+  participant IN as Ingress
+  participant PE as pricing-engine
+  participant R as Redis
+  participant CA as core-api
+  UI->>IN: POST /api/pricing/ticket/value (JWT)
+  IN->>PE: route by path
+  PE->>R: get market context (date, environment)
+  alt cache miss
+    PE->>CA: GET /internal/market/context?date&env (service token)
+    CA->>R: publish context
+  end
+  PE->>PE: TicketValuationManager → quant-lib calculators
+  PE-->>UI: PV, cashflows, curve audit
 ```
+
+### 4.7 EOD run (replaces the simulated batch)
+
+Spring Batch job `eodValuationJob(businessDate, environment)` in `batch-reporting`:
+1. **Seal:** resolve and freeze the market snapshot for `businessDate` and `environment` (a `core-api` snapshot commit, which already exists).
+2. **Read:** page through live trades from `core-api`.
+3. **Process:** value in chunks through `pricing-engine`, with bounded concurrency (reuse `BoundedFanOut`).
+4. **Write:** `eod_valuation` and `eod_cashflow`.
+5. **Finish:** trigger the dependent report batches (existing DAG edges).
+
+Progress is served over the existing SSE endpoint from Spring Batch step metadata, so any replica can answer. Re-runs are idempotent per `(businessDate, environment, snapshotId)`.
 
 ---
 
 ## 5. Environments and deployment
 
-### 5.1 Step 1 — Docker (developer machines and CI)
+### 5.1 Step 1 — Docker
 
-**Goal:** `docker compose up` starts the whole platform, seeded with sample data, on any developer laptop and inside CI.
+**Goal:** `docker compose up` runs the **whole stack** for local integration work and for CI end-to-end tests. Shared environments still deploy only through Jenkins and GitOps, as the repo rules require.
 
-**Recommended changes to the current set-up:**
+**Compose services:** `postgres`, `redis`, `minio`, `keycloak` (a dev realm export, **local only**), `core-api`, `pricing-engine`, `batch-reporting`, `frontend`.
+
+**Changes to the current set-up:**
 
 | Current | Change | Why |
 |---|---|---|
-| IntelliJ `.iml` with libraries at absolute Windows paths | Gradle wrapper + version catalog; remove `.iml`/`.idea` from git | Reproducible builds in Docker and CI |
-| Resources loaded by relative file path | Classpath resources and seed data via Flyway | Works inside containers |
-| No config separation | Spring profiles `local`, `docker`, `aws`; everything comes from env vars | Same image everywhere |
-| No health checks | Actuator `/actuator/health/{liveness,readiness}` | Compose `healthcheck`, ECS/ALB health checks |
-| Plain text logs | JSON logs (Logback + logstash encoder) with `traceId` | CloudWatch Insights queries |
+| One `backend/Dockerfile` | One Dockerfile per service (build argument `MODULE`), multi-stage, non-root (already done), `HEALTHCHECK` on `/actuator/health/readiness`, `JAVA_TOOL_OPTIONS=-XX:MaxRAMPercentage=75` | Three images from one Maven reactor |
+| Custom `HealthController` | Spring Boot Actuator (liveness/readiness groups, Prometheus endpoint) | K8s probes, metrics |
+| `nginx.conf.template` with one `__BACKEND_UPSTREAM__` | Three upstreams (`__CORE_UPSTREAM__`, `__PRICING_UPSTREAM__`, `__REPORTING_UPSTREAM__`) with path routing as in §4.2; WebSocket upgrade headers on `/ws/` | Service split without UI changes |
+| Compose `backend`/`frontend` marked "for CI image builds only" | A full-stack Compose file for local integration and CI e2e; `docker compose up -d postgres redis` stays as the documented day-to-day local set-up | Reproducible end-to-end tests |
+| `ddl-auto: update` | Flyway baseline + `validate` | Same schema everywhere |
+| Local report folder | MinIO bucket | Same code path as S3 |
 
-**Service Dockerfile (template, `services/<svc>/Dockerfile`):**
+**Done when:** from a clean clone, `cp .env.example .env && docker compose up -d --wait` gives a working UI on `:3000` with seed data, and the Playwright smoke suite passes.
 
-```dockerfile
-# build stage
-FROM eclipse-temurin:21-jdk AS build
-WORKDIR /src
-COPY . .
-ARG SERVICE
-RUN ./gradlew :services:${SERVICE}:bootJar --no-daemon -x test
+### 5.2 Step 2 — AWS target (af-south-1)
 
-# runtime stage
-FROM eclipse-temurin:21-jre-alpine
-RUN addgroup -S nex && adduser -S nex -G nex
-WORKDIR /app
-ARG SERVICE
-COPY --from=build /src/services/${SERVICE}/build/libs/*.jar app.jar
-USER nex
-EXPOSE 8080
-ENV JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75 -XX:+UseZGC"
-HEALTHCHECK --interval=15s --timeout=3s --retries=5 CMD wget -qO- http://localhost:8080/actuator/health/readiness || exit 1
-ENTRYPOINT ["java","-jar","/app/app.jar"]
-```
-
-**`deploy/docker/docker-compose.yml` (outline):**
-
-```yaml
-name: nex
-services:
-  postgres:
-    image: postgres:16-alpine
-    environment: { POSTGRES_DB: nex, POSTGRES_USER: nex_admin, POSTGRES_PASSWORD: ${PG_ADMIN_PASSWORD} }
-    volumes: [ "pgdata:/var/lib/postgresql/data", "./init-db:/docker-entrypoint-initdb.d:ro" ]  # creates schemas + users
-    healthcheck: { test: ["CMD-SHELL","pg_isready -U nex_admin"], interval: 5s, retries: 10 }
-  keycloak:
-    image: quay.io/keycloak/keycloak:25.0
-    command: ["start-dev","--import-realm"]
-    environment: { KC_DB: postgres, KC_DB_URL: jdbc:postgresql://postgres/nex, KC_DB_SCHEMA: keycloak,
-                   KC_DB_USERNAME: keycloak, KC_DB_PASSWORD: ${KC_DB_PASSWORD},
-                   KEYCLOAK_ADMIN: admin, KEYCLOAK_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD} }
-    volumes: [ "./keycloak/nex-realm.json:/opt/keycloak/data/import/nex-realm.json:ro" ]
-    depends_on: { postgres: { condition: service_healthy } }
-    ports: [ "8081:8080" ]
-  refdata-service:     { image: nex/refdata-service:${TAG:-local},    env_file: .env, depends_on: { postgres: { condition: service_healthy } } }
-  trade-service:       { image: nex/trade-service:${TAG:-local},      env_file: .env, depends_on: [ refdata-service ] }
-  marketdata-service:  { image: nex/marketdata-service:${TAG:-local}, env_file: .env, depends_on: [ minio ] }
-  pricing-service:     { image: nex/pricing-service:${TAG:-local},    env_file: .env, depends_on: [ trade-service, marketdata-service ] }
-  api-gateway:
-    image: nex/api-gateway:${TAG:-local}
-    env_file: .env
-    ports: [ "8080:8080" ]
-    depends_on: [ refdata-service, trade-service, marketdata-service, pricing-service, keycloak ]
-  web:
-    image: nex/web:${TAG:-local}          # nginx serving the Vite build; proxies /api -> api-gateway
-    ports: [ "3000:80" ]
-    depends_on: [ api-gateway ]
-  minio:                                  # S3-compatible storage locally
-    image: minio/minio
-    command: server /data --console-address ":9001"
-    environment: { MINIO_ROOT_USER: ${MINIO_USER}, MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD} }
-volumes: { pgdata: {} }
-```
-
-The "Docker done" criteria are: a fresh clone, then `cp .env.example .env`, then `docker compose up -d` gives a working UI at `http://localhost:3000` with seed data, and the Playwright smoke suite passes against it.
-
-### 5.2 Step 2 — AWS target architecture
+**Recommendation: Amazon EKS with ArgoCD, not ECS.** The repo already has Kustomize manifests, ArgoCD applications, External Secrets, preview-namespace automation, and a rule that deployment goes through GitOps. EKS keeps all of that. ECS would mean redesigning the deployment flow, which `docs/AI_CONTEXT.md` explicitly rules out.
 
 ```mermaid
 flowchart TB
-  USER[Users - pilot bank] --> R53[Route 53 + ACM TLS]
-  R53 --> CF[CloudFront + WAF]
-  CF -->|static| S3W[(S3: React build)]
-  CF -->|/api/*| ALB[Application Load Balancer<br/>public subnets]
-  R53 --> ALBK[ALB listener: auth.* → Keycloak]
+  U[Users] --> CF[Cloudflare DNS]
+  CF --> ALB[ALB via AWS Load Balancer Controller<br/>ACM TLS, WAF]
   subgraph VPC["VPC af-south-1, 2 AZs"]
-    ALB --> GWT[ECS Fargate: api-gateway]
-    ALBK --> KCT[ECS Fargate: keycloak]
-    subgraph PRIV["private subnets - ECS Service Connect"]
-      GWT --> RDT[refdata-service]
-      GWT --> TRT[trade-service]
-      GWT --> MDT[marketdata-service]
-      GWT --> PRT[pricing-service]
+    ALB --> EKS
+    subgraph EKS["EKS cluster: namespace ats-capital-markets"]
+      FE[frontend]
+      CA[core-api x2]
+      PE[pricing-engine x2..n HPA]
+      BR[batch-reporting x2]
+      ESO[External Secrets Operator]
     end
     RDS[(RDS PostgreSQL 16<br/>Multi-AZ in pilot)]
-    PRIV --> RDS
-    KCT --> RDS
+    EC[(ElastiCache Redis)]
+    CA --> RDS
+    BR --> RDS
+    CA --> EC
+    PE --> EC
   end
-  PRIV --> S3D[(S3: uploads, reports<br/>KMS encrypted)]
-  PRIV -.secrets.-> SM[Secrets Manager + KMS]
-  PRIV -.logs/metrics/traces.-> CW[CloudWatch + X-Ray]
-  ECR[(ECR: images, scan on push)] -.pull.-> PRIV
+  BR --> S3[(S3 reports, SSE-KMS)]
+  ESO --> SM[Secrets Manager + KMS]
+  ECR[(ECR: scan on push, immutable tags)] --> EKS
+  ARGO[ArgoCD: central instance or in-cluster] -->|sync from GitOps repo| EKS
+  JK[Jenkins] -->|push images| ECR
+  JK -->|commit image tags| GIT[ats-capital-markets-gitops]
+  GIT --> ARGO
 ```
 
-**Docker Compose → AWS mapping:**
+| Component | AWS service | Notes |
+|---|---|---|
+| Container registry | **ECR** (`ats-<env>-core-api`, `-pricing-engine`, `-batch-reporting`, `-frontend`) | Extends the existing `ats-dev-backend`/`-frontend` repositories. Scan on push, immutable tags, lifecycle policy |
+| Kubernetes | **EKS** (managed node group, 2 AZs; Karpenter optional later) | Register as an ArgoCD destination (`ats-capital-markets-aws-dev`, `-aws-pilot`) |
+| Ingress | **AWS Load Balancer Controller** (ALB) with an `alb` ingress class in the `aws-*` overlays. Traefik stays on RKE2 | The same path routing as §4.2, expressed as ALB ingress rules |
+| Database | **RDS PostgreSQL 16** (single-AZ dev, Multi-AZ pilot), PITR, KMS | Matches the PLATFORM_STATE target of a dedicated database outside the cluster |
+| Cache | **ElastiCache for Redis** (TLS, auth token) | Replaces the in-cluster Redis deployment on AWS |
+| Object storage | **S3** (block public access, SSE-KMS, versioning) | Report output |
+| Secrets | **Secrets Manager** + External Secrets (`ClusterSecretStore/aws-secrets-manager`), IRSA | Same Kubernetes Secret names and keys as today (`capital-markets-db`, `capital-markets-redis`) |
+| Identity | Keep **Keycloak** at `auth.alintatechsolutions.co.za` | No change for the UI |
+| DNS/TLS | Cloudflare DNS → ALB (ACM certificate; Cloudflare "Full (strict)") | e.g. `cm-dev.alintatechsolutions.co.za` (already the `APP_URL` in `Jenkinsfile.aws`) |
+| Observability | CloudWatch Container Insights + Fluent Bit; Prometheus/Grafana optional | JSON logs with `traceId` |
+| Guardrails | CloudTrail, GuardDuty, AWS Config, AWS Backup | Pilot bank due diligence |
 
-| Compose | AWS |
-|---|---|
-| `web` (nginx) | S3 bucket + CloudFront (same Vite build artefact) |
-| `api-gateway`, `*-service` | ECS Fargate services (one task definition per service), images in ECR, discovery via ECS Service Connect |
-| `keycloak` | ECS Fargate service (production mode, 2 tasks), schema on RDS |
-| `postgres` | Amazon RDS for PostgreSQL 16 (single-AZ dev, Multi-AZ pilot), automated backups + PITR |
-| `minio` | Amazon S3 (SSE-KMS, versioning, block public access) |
-| `.env` | SSM Parameter Store (config) + Secrets Manager (secrets) |
-| container logs | CloudWatch Logs (awslogs driver), Container Insights |
-
-**Why ECS Fargate rather than EKS:** there are no clusters to patch, and it maps one-to-one from Compose. It is also cheaper to run for a 6-service pilot, and a small team can operate it. Revisit EKS at Beta if pooled multi-tenancy or a service mesh becomes necessary.
-
-**Security baseline on AWS:**
-- Private subnets for all services and RDS; only the ALB is public.
-- Security groups allow ALB → gateway only, and gateway → services.
-- RDS accepts connections only from the ECS task security group.
-- WAF managed rule sets on CloudFront.
-- CloudTrail, GuardDuty and AWS Config are enabled.
-- KMS keys per environment; AWS Backup for RDS and S3.
-- IAM task roles follow least privilege: each service can reach only its own S3 prefix and secrets.
-- Data stays in af-south-1, which supports the pilot's POPIA and data-residency questions.
-
-### 5.3 Terraform layout
+**GitOps layout additions** (in this repo or `ats-capital-markets-gitops`, whichever is canonical):
 
 ```
-deploy/terraform/
-├── modules/
-│   ├── network/          # VPC, subnets, NAT (or VPC endpoints), flow logs
-│   ├── ecr/              # repos per service, scan on push, lifecycle policy
-│   ├── rds-postgres/     # instance, parameter group, KMS, backups
-│   ├── ecs-cluster/      # cluster, Service Connect namespace, Container Insights
-│   ├── ecs-service/      # reusable: task def, service, autoscaling, log group, IAM task role
-│   ├── alb/              # ALB, listeners, target groups, ACM certs
-│   ├── web-cdn/          # S3 + CloudFront + WAF
-│   ├── secrets/          # Secrets Manager entries, SSM params
-│   └── github-oidc/      # IAM role assumable by GitHub Actions for this repo only
-└── envs/
-    ├── dev/     (main.tf, terraform.tfvars)   # smaller sizes, single-AZ
-    └── pilot/   (main.tf, terraform.tfvars)   # Multi-AZ RDS, 2 tasks per service
+apps/ats-capital-markets/
+├── base/                              # + core-api, pricing-engine, batch-reporting deployments/services, HPA, PDBs
+└── overlays/
+    ├── devops-pipeline/               # existing (RKE2)
+    ├── aws-dev/                       # ALB ingress, ElastiCache/RDS endpoints, ESO aws store, IRSA annotations
+    └── aws-pilot/                     # replicas, Multi-AZ endpoints, stricter resources
+infrastructure/argocd/
+├── ats-capital-markets-aws-dev.yaml
+└── ats-capital-markets-aws-pilot.yaml
 ```
 
-State lives in an S3 bucket with locking, one state per environment. Plans run on PRs (commented by CI) and applies run on merge (dev) or on release approval (pilot).
+**Infrastructure as code:** add a new `infrastructure/terraform/` with modules `network`, `eks` (with the ALB controller, ESO and IRSA roles), `rds`, `elasticache`, `s3`, `ecr`, `iam-jenkins` (role assumed by Jenkins, replacing static keys) and `observability`, plus environments `aws-dev` and `aws-pilot`. State goes in S3 with locking. Record every applied change in `docs/PLATFORM_STATE.md`, as the repo requires.
+
+**Transition:** RKE2 production and PR previews keep running unchanged until the AWS pilot environment is signed off. Whether to cut over production or keep both is decided at pilot exit (D4).
 
 ---
 
-## 6. CI/CD: containerise, test, scan, deploy
+## 6. CI/CD: containerise, test, scan, deploy (Jenkins)
 
 ### 6.1 Pipeline
 
+We extend the existing `Jenkinsfile` stages (Checkout → Determine Build Context → Backend Tests → Frontend Build → Build and Push Images → Update GitOps → PR preview stages) and bring `Jenkinsfile.aws` in line with them.
+
 ```mermaid
 flowchart LR
-  PR[Pull request] --> B[Build + unit tests<br/>Gradle, Vitest]
-  B --> Q[Static analysis<br/>Spotless, Error Prone, ESLint]
-  Q --> I[Integration tests<br/>Testcontainers]
-  I --> S[Security checks<br/>CodeQL, dependency scan,<br/>gitleaks, Checkov]
-  S --> C[Build images<br/>+ SBOM + Trivy scan]
-  C --> E[Compose e2e<br/>Playwright + ZAP baseline]
-  E -->|merge to main| P[Push to ECR<br/>tag = git SHA]
-  P --> D[Deploy AWS dev<br/>Terraform + ECS rolling]
-  D --> ST[Smoke tests]
-  ST -->|tag vX.Y.Z + approval| PL[Deploy AWS pilot]
+  A[Checkout + context] --> B[Backend: mvn verify<br/>unit + Testcontainers + JaCoCo]
+  A --> C[Frontend: npm ci, lint,<br/>vitest, build]
+  B --> D[Security: gitleaks, OWASP dep-check,<br/>npm audit, Semgrep]
+  C --> D
+  D --> E[Build 4 images<br/>tag = git SHA]
+  E --> F[Trivy scan + SBOM]
+  F --> G[Compose e2e<br/>Playwright + ZAP baseline]
+  G --> H[Push to registry<br/>GHCR and/or ECR]
+  H --> I[Update GitOps tags<br/>preview / aws-dev / aws-pilot]
+  I --> J[ArgoCD sync<br/>+ post-deploy smoke]
 ```
 
-| Workflow | Trigger | Jobs |
+| Stage | Tooling | Gate |
 |---|---|---|
-| `ci.yml` | every PR and push | build, unit tests, static analysis, integration tests, security checks, image build and scan, Compose e2e |
-| `deploy-dev.yml` | merge to `main` | push images to ECR, `terraform apply envs/dev`, ECS deploy, smoke tests |
-| `release.yml` | tag `v*` | re-tag images, `terraform apply envs/pilot` with **manual approval** (GitHub Environment), smoke tests, release notes |
-
-**`ci.yml` (excerpt):**
-
-```yaml
-name: ci
-on: [pull_request, push]
-permissions: { contents: read, security-events: write }
-jobs:
-  build-test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: '21', cache: gradle }
-      - run: ./gradlew build integrationTest --no-daemon    # unit + Testcontainers + Spotless/Error Prone
-      - uses: actions/setup-node@v4
-        with: { node-version: '22', cache: npm, cache-dependency-path: nex-web/package-lock.json }
-      - run: cd nex-web && npm ci && npm run lint && npm test -- --run && npm run build
-  security:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: github/codeql-action/init@v3
-        with: { languages: 'java-kotlin,javascript-typescript', build-mode: none }
-      - uses: github/codeql-action/analyze@v3
-      - uses: gitleaks/gitleaks-action@v2
-      - uses: bridgecrewio/checkov-action@v12
-        with: { directory: deploy/terraform }
-  images-e2e:
-    needs: [build-test]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: docker compose -f deploy/docker/docker-compose.yml build
-      - uses: aquasecurity/trivy-action@0.24.0
-        with: { scan-type: image, image-ref: 'nex/pricing-service:local', severity: 'CRITICAL,HIGH', exit-code: '1' }
-      - run: docker compose -f deploy/docker/docker-compose.yml up -d --wait
-      - run: cd nex-web && npx playwright install --with-deps && npm run e2e
-      - uses: zaproxy/action-baseline@v0.12.0
-        with: { target: 'http://localhost:3000' }
-```
-
-In practice, run the Trivy scan for every image as a matrix job. Pin actions to commit SHAs once the pipeline is stable.
-
-### 6.2 Security checks (quality gates)
-
-| Check | Tool | Gate |
-|---|---|---|
-| SAST (Java, TypeScript) | CodeQL | No new high or critical alerts |
-| Dependency vulnerabilities | Dependabot alerts + OWASP dependency-check (Gradle) + `npm audit --omit=dev` | No known critical CVEs; high CVEs need a waiver with an expiry date |
-| Secrets in code | gitleaks + GitHub secret scanning | Zero findings |
-| Container images | Trivy (OS + libraries), ECR scan on push | No critical/high findings with a fix available |
-| Infrastructure as code | Checkov (Terraform) | No failed high-severity checks, or documented skips |
+| Backend build and tests | `mvn -B verify` (Surefire + Failsafe, Testcontainers PostgreSQL/Redis, JaCoCo) | All tests pass; coverage does not drop (ratchet) |
+| Frontend | `npm ci`, ESLint, `tsc -b`, Vitest, `vite build` | Zero lint errors; tests pass; bundle budget (§7) |
+| Secrets | gitleaks | Zero findings |
+| Dependencies (SCA) | OWASP dependency-check Maven plugin; `npm audit --omit=dev` | No critical; high findings need a time-boxed waiver |
+| SAST | Semgrep (Java/TS rulesets); GitHub CodeQL optional | No new high findings |
+| Images | Trivy (`--severity CRITICAL,HIGH --ignore-unfixed --exit-code 1`), ECR scan on push | Blocks on fixable critical/high |
+| SBOM | CycloneDX Maven plugin + Syft for images | Archived per build |
+| IaC and manifests | Checkov (Terraform + Kustomize output), `kubeconform` | No failed high checks |
+| E2E | `docker compose up --wait` + Playwright smoke (login → book OIS → value → blotter → report) | Pass |
 | DAST | OWASP ZAP baseline against the Compose stack | No high alerts |
-| SBOM | CycloneDX Gradle plugin + Syft for images | Published as a build artefact |
-| Branch protection | GitHub | PR review by 1 other developer, all checks green, linear history |
+| Push/deploy | Immutable git-SHA tags (**drop `latest`**); GitOps commit; ArgoCD sync | Post-deploy smoke on the preview/AWS URL |
 
-### 6.3 Test strategy
+**`Jenkinsfile.aws` changes:**
+- Use an IAM role (Jenkins instance profile or `AssumeRole` via `iam-jenkins`) instead of `ats-dev-aws-credentials`.
+- Build all four images.
+- Add the test and scan stages above.
+- Update the `aws-dev` overlay image tags in GitOps. **Do not deploy directly.**
 
-| Level | Scope | Tooling | Target |
-|---|---|---|---|
-| Unit — quant | Day counts, calendars, schedules, curves, pricers | JUnit 5, AssertJ, **golden values from QuantLib** (fixtures generated by a Python script in `libs/nex-quant/src/test/resources/golden/`) | ≥ 90% line coverage on `nex-quant` |
-| Unit — services | Validation, mappers, lifecycle rules, P&L | JUnit 5, Mockito | ≥ 75% |
-| Integration | Repositories, Flyway, REST controllers, security | Spring Boot Test + **Testcontainers** (PostgreSQL, Keycloak) | Every endpoint |
-| Contract | Service ↔ service and UI ↔ gateway | OpenAPI schema validation of responses; generated clients compile | Every spec |
-| Front-end | Components, hooks | Vitest + React Testing Library | Critical screens |
-| End to end | Login → capture OIS → value → cashflows → P&L → export | **Playwright** against Compose | Runs on every PR |
-| Reconciliation | Pilot fixtures replayed through EOD | JUnit data-driven test | Within tolerance (§8.3) |
-| Performance | 10k trades EOD; blotter with 5k rows | k6 or Gatling against Compose | EOD < 10 min; p95 API < 500 ms |
+### 6.2 Test strategy
+
+| Level | Scope | Target |
+|---|---|---|
+| Unit — `quant-lib` | Day counts, calendars, schedules, curves/bootstrap, each product's calculator | Keep all 83 existing tests green. Add **golden tests** against independent reference values (QuantLib or pilot/Bloomberg) for OIS, bond, deposit and FX forward first. Line coverage ≥ 80% in `quant-lib` by pilot |
+| Service | Controllers, security (`@PreAuthorize` per role), trade lifecycle, EOD job | `@SpringBootTest` + Testcontainers; every endpoint has an authorisation test |
+| Contract | `core-api` ↔ `pricing-engine` ↔ `batch-reporting` | OpenAPI (springdoc) specs committed; generated clients; schema-diff check in CI |
+| Front end | Stores, pricing builders (`ticketParameterBuilders.ts`, `utils/pricing.ts`), key components | Vitest + React Testing Library; critical paths covered |
+| E2E | The 9 modules' happy paths | Playwright on Compose (PR) and on preview/AWS dev (post-deploy) |
+| Performance | EOD 10k trades; ticket valuation p95; blotter 5k rows | EOD < 15 min on AWS dev; valuation p95 < 500 ms; blotter p95 < 1 s |
 
 ---
 
-## 7. Front-end dashboard and UI (React)
+## 7. Front end — efficiency and look & feel
 
-The screens, navigation and workflows **stay as they are**. The work covers wiring them to the new APIs, efficiency, and look & feel.
+The UI, its modules and its workflows **stay as they are**. Follow `docs/FRONTEND_UI_APP_SHELL.md` (fixed app shell, dark terminal theme, sharp corners).
 
 | Area | Change |
 |---|---|
-| API integration | Generated TypeScript client from `libs/nex-api` specs (`orval` or `openapi-typescript`), so there are no hand-written fetch calls and type errors appear when contracts change |
-| Data fetching | **TanStack Query**: caching, background refresh, request de-duplication, optimistic updates on save/amend |
-| Auth | `oidc-client-ts` (or `keycloak-js`): PKCE login, silent token refresh, role-based menu and action visibility |
-| Forms | `react-hook-form` + `zod` schemas generated from the trade JSON Schemas (one set of validation rules for UI and server); date pickers and dropdowns instead of free text; inline errors |
-| Grids | **AG Grid** (community) for the blotter, cashflows and P&L: virtual scrolling, column filters, CSV export |
-| Performance | Vite production build, route-level code splitting (`React.lazy`), bundle analysis (`rollup-plugin-visualizer`), memoising heavy tables, gzip/brotli via nginx/CloudFront. Budget: initial JS < 300 KB gzipped; LCP < 2.5 s |
-| Look & feel | One design-token theme (colours, spacing, typography) applied across screens; consistent page header, cards and density suitable for trading; ATS logo and colours; loading skeletons, toasts for success/error, empty states; keyboard shortcuts on the trade ticket |
-| Accessibility | WCAG 2.1 AA basics: labels, focus order, colour contrast (checked with axe in Playwright) |
-| Quality | ESLint + Prettier, strict TypeScript, Vitest, Playwright e2e in CI |
-| Container | Multi-stage Dockerfile (`node:22` build → `nginx:alpine` serve); `nginx.conf` proxies `/api` to the gateway locally; the same `dist/` is uploaded to S3 on AWS |
+| Reproducible builds | Pin every `latest` dependency (react, react-dom, typescript, zustand, lucide-react, @vitejs/plugin-react) to exact versions; Renovate/Dependabot for upgrades |
+| Bundle and load time | `React.lazy` per module tab (9 chunks); load **exceljs only on export** (dynamic `import()`); `manualChunks` for vendor code. Budget: initial JS ≤ 150 KB gzipped (today 185 KB main + 256 KB exceljs) |
+| Runtime efficiency | Split `TradingWorkstation.tsx` (4.4k lines) and `MdcmModule.tsx` (2.6k lines) into feature subcomponents and hooks with no visual change; memoise grid rows; narrow zustand selectors to avoid re-renders; virtualise long lists (blotter, curve nodes); debounce live re-valuation calls |
+| API layer | Generate TypeScript types from springdoc OpenAPI (`openapi-typescript`) into `src/api/generated`; `api.ts` becomes thin wrappers; one retry and error-toast policy |
+| Look & feel | Consolidate colours and spacing into Tailwind theme tokens; consistent loading skeletons, empty states and error toasts across modules; convert any remaining light-palette components to the dark theme; check keyboard focus and contrast (axe in Playwright) |
+| Code health | Delete `srcFE16Jul/`, `srcFE16Jul.zip`, `dump_xlsx_tmp.cjs`; move the sample instruments in `App.tsx` to fixtures; add ESLint + Prettier + Vitest; strict TypeScript |
+| Delivery | nginx routes to three upstreams (§5.1); gzip/brotli and cache headers for hashed assets |
 
 ---
 
@@ -657,143 +386,138 @@ gantt
   dateFormat YYYY-MM-DD
   axisFormat %d %b
   section MVP build
-  S0 Foundation              :s0, 2026-09-28, 2026-10-09
-  S1 Refdata + Trades        :s1, 2026-10-12, 2026-10-23
-  S2 Market data + Schedules :s2, 2026-10-26, 2026-11-06
-  S3 Pricing engine + P&L    :s3, 2026-11-09, 2026-11-20
-  S4 Reports, EOD, AWS dev   :s4, 2026-11-23, 2026-12-04
-  S5 Hardening + release     :s5, 2026-12-07, 2026-12-18
-  MVP v1.0.0                 :milestone, m1, 2026-12-18, 1d
+  S0 Foundations and safety        :s0, 2026-09-28, 2026-10-09
+  S1 Auth, state, storage          :s1, 2026-10-12, 2026-10-23
+  S2 Extract pricing-engine        :s2, 2026-10-26, 2026-11-06
+  S3 batch-reporting + real EOD    :s3, 2026-11-09, 2026-11-20
+  S4 AWS dev (EKS) + UI pass       :s4, 2026-11-23, 2026-12-04
+  S5 Hardening and release         :s5, 2026-12-07, 2026-12-18
+  MVP v1.0.0                       :milestone, m1, 2026-12-18, 1d
   section Freeze
-  Change freeze / holidays   :f, 2026-12-19, 2027-01-08
+  Change freeze / holidays         :f, 2026-12-19, 2027-01-08
   section Pilot
-  Onboarding                 :p1, 2027-01-11, 2027-01-29
-  Parallel run + feedback    :p2, 2027-02-01, 2027-03-31
-  Stabilise + evaluate       :p3, 2027-04-01, 2027-04-30
+  Onboarding                       :p1, 2027-01-11, 2027-01-29
+  Parallel run + feedback          :p2, 2027-02-01, 2027-03-31
+  Stabilise + evaluate             :p3, 2027-04-01, 2027-04-30
 ```
 
 ### 8.2 Sprint backlog
 
-**S0 — Foundation (28 Sep – 9 Oct)**
-- Gradle multi-project: `build-logic`, `libs/*`, `services/*` skeletons (Spring Boot, Actuator, security, JSON logging, error model).
-- `nex-quant` created from the compiling code, with golden tests for day counts, Modified Following, interpolation and tenor parsing.
-- React app moved to `nex-web/`; Vite build and Dockerfile; OIDC login with Keycloak.
-- `docker-compose.yml`: postgres (schemas and users init script), keycloak (realm export with roles and test users), gateway, 4 service stubs, web, minio.
-- OpenAPI v0 for all 4 services; generated Java and TypeScript clients.
-- CI `ci.yml`: build, tests, CodeQL, gitleaks, Trivy, Compose up + smoke.
-- Inventory the React screens and actions against §3; confirm the MVP scope list with the product owner.
-- ADRs: 001 microservices boundaries, 002 PostgreSQL schema-per-service, 003 Keycloak, 004 ECS Fargate, 005 trade versioning and JSONB economics.
+**S0 — Foundations and safety (28 Sep – 9 Oct)**
+- Maven parent POM; move current code into `core-api` unchanged; 83 tests green in Jenkins.
+- **Flyway `V0__baseline`** from the current Hibernate schema; `ddl-auto: validate` (except local H2); verify on an empty Postgres and on a copy of the dev database.
+- Spring Boot Actuator, Micrometer, JSON logging; replace `System.out.println` with SLF4J; springdoc OpenAPI.
+- Remove dead code and assets (G9). Mark `/api/pricing/value` deprecated, and remove it if the UI doesn't use it.
+- Front end: pin dependencies; ESLint, Prettier and Vitest set-up; delete leftovers.
+- Jenkins: add gitleaks, dependency-check, `npm audit`, Trivy and SBOM stages (reporting only this sprint; they block from S2).
+- Full-stack `docker-compose.yml` (plus Keycloak dev realm and MinIO) for local and CI use.
+- ADRs: 001 service split, 002 EKS + ArgoCD on AWS, 003 Flyway baseline, 004 Redis state, 005 S3 storage.
 
-**S1 — Reference data and trade capture (12 – 23 Oct)**
-- `refdata-service`: counterparties, books, currencies, business centres, holidays, indices; CSV import; Flyway seeds from existing JSON/CSV (formats fixed).
-- `trade-service`: create, preview, get, list (blotter), amend (versioned, `If-Match`), cancel; JSON Schema validation for OIS, Bond and Loan; server-generated trade IDs; audit log.
-- UI: Trade Capture wired (dropdowns from refdata, save, preview, amend, cancel); blotter grid.
-- Testcontainers integration tests; Playwright: login → book OIS.
+**S1 — Auth, state and storage (12 – 23 Oct)**
+- Keycloak JWT enabled; `TEMPORARY_AUTH_BYPASS` removed; Keycloak realm roles mapped to the 20 RBAC roles and permission codes; dev login limited to `@Profile("local")`.
+- Authorisation tests per endpoint and role.
+- Redis-backed job state for the risk engine and batch progress; ShedLock on `SpringDynamicSchedulerService`.
+- `S3FileStorageService` (MinIO locally).
+- `trade_version` audit table, written on every lifecycle action; shown in the blotter's trade history.
+- Playwright smoke in CI against Compose.
 
-**S2 — Market data and schedules (26 Oct – 6 Nov)**
-- `marketdata-service`: upload DFs/zeros, fixings, FX and holidays (CSV/XLSX via POI) with a validation report; snapshots (open/seal); S3/minio storage of raw files.
-- `nex-quant`: `ScheduleGenerator` (frequency, stubs, roll direction, lags, calendars) and `InterpolatedDiscountCurve` (log-linear DF), with golden tests.
-- UI: Market Data tab (upload, validation result, snapshot list, curve and fixing viewer).
+**S2 — Extract `pricing-engine` (26 Oct – 6 Nov)**
+- `quant-lib` module (pricing foundation, tools and calculators); `platform-common`.
+- `pricing-engine` app: `PricingController`, the `TicketValuationManager`s, `RiskEngine*`, STOMP risk socket; market context from Redis, with a fallback to the `core-api` internal endpoint.
+- nginx and ingress path routing; contract tests; generated Java client.
+- Golden-value tests for OIS, bond, deposit and FX forward.
+- Performance baseline for ticket valuation.
 
-**S3 — Pricing engine and P&L (9 – 20 Nov)**
-- `nex-quant`: `OisPricer` (fixed + compounded overnight leg, realised vs projected), `BondPricer`, `LoanPricer`, DV01 bump.
-- `pricing-service`: valuation endpoint, cashflow endpoints (FUTURE/REALIZED), P&L per trade and book, result storage.
-- Golden tests vs QuantLib for every product; start the reconciliation test with pilot fixtures, if received.
-- UI: Trade Valuation, Future Cashflows, Realized Cashflows and Trade P&L actions render grids (replacing dialogs).
+**S3 — `batch-reporting` and real EOD (9 – 20 Nov)**
+- `batch-reporting` app: `reporting/*`, `batch`; schema `reporting`.
+- **Spring Batch `eodValuationJob`** (§4.7); `eod_run`/`eod_valuation`/`eod_cashflow`; SSE progress from job metadata; the Operations module wired to it.
+- Report queries read from persisted EOD results; the dependency graph runs after EOD.
+- Load test: EOD with 10k synthetic trades.
 
-**S4 — Reports, EOD and AWS dev (23 Nov – 4 Dec)**
-- `pricing-service`: EOD run (idempotent, parallel with virtual threads, progress/status endpoint); reports: blotter, PV by book, cashflow ladder, P&L, audit extract; CSV/XLSX export (PDF is a stretch).
-- Terraform: network, ECR, RDS, ECS cluster and services, ALB, CloudFront/S3, secrets, GitHub OIDC; `deploy-dev.yml` live; platform running on **AWS dev**.
-- UI: Reports tab, EOD screen; look-and-feel pass (theme tokens, layout, skeletons, toasts).
+**S4 — AWS dev on EKS and UI pass (23 Nov – 4 Dec)**
+- Terraform: network, EKS (ALB controller, ESO, IRSA), RDS, ElastiCache, S3, ECR repos, Jenkins IAM role.
+- `aws-dev` Kustomize overlay; ArgoCD application; Secrets Manager entries; `cm-dev` DNS → ALB.
+- `Jenkinsfile.aws` extended (tests, scans, 4 images, GitOps update, no static keys).
+- UI: module code splitting, lazy-loaded exceljs, decomposition of `TradingWorkstation`/`MdcmModule`, theme-token and skeleton/toast pass.
+- `docs/PLATFORM_STATE.md` updated.
 
 **S5 — Hardening and release (7 – 18 Dec)**
-- Full Playwright regression, performance tests (§6.3), ZAP baseline clean, dependency and image CVEs resolved.
-- Runbooks: deploy/rollback, EOD failure, DB restore (restore drill on AWS dev), Keycloak user admin.
-- `release.yml` + **AWS pilot environment** provisioned (Multi-AZ RDS), not yet loaded with client data.
-- Tag **v1.0.0 on 18 Dec 2026**, with release notes and a demo to stakeholders.
+- Full Playwright regression on AWS dev; ZAP baseline; all scan gates green.
+- RDS restore drill; runbooks (deploy/rollback via GitOps revert, EOD failure, Keycloak user admin, incident response).
+- `aws-pilot` environment provisioned (Multi-AZ RDS, 2+ replicas), empty.
+- **Tag `v1.0.0` on 18 Dec 2026**, with release notes and a stakeholder demo.
 
-### 8.3 MVP acceptance criteria (release gate for v1.0.0)
+### 8.3 MVP acceptance criteria
 
 | # | Criterion |
 |---|---|
-| AC1 | Every feature F1–F15 in §3 works end to end in the React UI against the Docker Compose stack **and** AWS dev |
-| AC2 | `docker compose up` from a clean clone gives a working system in under 5 minutes |
-| AC3 | CI is green on `main`: unit, integration, e2e, CodeQL, gitleaks, Trivy, Checkov and ZAP, with no open critical/high findings |
-| AC4 | OIS, bond and loan PVs are within 0.01% of notional of QuantLib golden values (target 0.5 bp); cashflow dates match the calendar-adjusted schedules exactly |
-| AC5 | Every trade change is traceable through `versions` and `audit_log`, with user and timestamp |
-| AC6 | EOD for 10,000 trades finishes in under 10 min on AWS dev; blotter API p95 < 500 ms |
-| AC7 | Backup restore drill completed on AWS dev (RPO ≤ 15 min, RTO ≤ 4 h documented) |
-| AC8 | Runbooks and API docs (OpenAPI rendered) are published in `docs/` |
+| AC1 | All 9 modules and 17 product types work as they do today, now running on `core-api` + `pricing-engine` + `batch-reporting`, on Docker Compose **and** AWS dev |
+| AC2 | No anonymous access: every `/api/**` call needs a valid Keycloak JWT, and role checks pass the authorisation test suite |
+| AC3 | Killing any single pod loses no session, job, schedule or report file. Scheduled batches run exactly once |
+| AC4 | The EOD run values all live trades for a date and environment, persists the results, and runs the dependent reports. 10k trades complete in < 15 min |
+| AC5 | A new database is created only by Flyway; `validate` passes in every deployed environment |
+| AC6 | The Jenkins pipeline runs tests, SCA, SAST, secret, image and IaC scans and the e2e suite, with no open critical/high findings. Images use immutable tags; deployment goes only through GitOps and ArgoCD |
+| AC7 | Pricing results are unchanged by the split (a regression suite compares before and after for all product types). Golden tests pass for OIS, bond, deposit and FX forward |
+| AC8 | Front end: dependencies pinned, lint/tests in CI, initial JS ≤ 150 KB gzipped, no visual regressions in the 9 modules |
+| AC9 | RDS restore drill done; runbooks and `PLATFORM_STATE.md` up to date |
 
-### 8.4 Scope protection (if a sprint slips)
+### 8.4 Scope protection
 
-Cut in this order, and **never cut** tests, security checks or audit:
-1. PDF export (keep CSV/XLSX)
-2. Loan drawdown schedules (keep bullet loans)
-3. DV01
-4. AWS dev deployment moves to the first week of January (Docker MVP still ships on 18 Dec)
-5. Bond clean/dirty split (keep PV)
+If a sprint slips, cut in this order. **Never cut** G1–G5 (auth, state, EOD, migrations, storage), tests or security gates.
+1. Front-end component decomposition (keep code splitting and pinning).
+2. `batch-reporting` stays a module inside `core-api` (the real EOD and ShedLock still ship).
+3. AWS dev on EKS moves to the first two weeks of January. The Docker Compose MVP and the RKE2 preview flow still ship on 18 Dec.
+4. Keep extra golden tests to the four listed products.
 
-### 8.5 Definition of Done (per story)
+### 8.5 Definition of Done
 
-- Code merged through a PR with 1 review; all CI gates green.
-- Tests at the right levels (§6.3); `nex-quant` changes include golden values.
-- OpenAPI spec updated, and generated clients rebuilt without errors.
-- Flyway migration included for any schema change; it is backward compatible for one release.
-- Audit event emitted for every state change.
-- Runs in Docker Compose; demoed to the product owner.
+- PR with review; preview environment checked (repo workflow); all Jenkins gates green.
+- Tests at the right level; no pricing regression for the product types touched.
+- Flyway migration for every schema change.
+- Audit written for every state change.
+- OpenAPI updated.
+- `PLATFORM_STATE.md` updated for any platform change.
 
 ---
 
-## 9. Pilot customer onboarding and feedback (11 Jan – 30 Apr 2027)
+## 9. Pilot onboarding and feedback (11 Jan – 30 Apr 2027)
 
-### 9.1 Phases
+| Phase | Dates | Activities |
+|---|---|---|
+| **Onboarding** | 11 – 29 Jan | `aws-pilot` go-live; Keycloak users/roles for pilot staff (optional federation to their IdP); load reference data (counterparties, portfolios, calendars, credit ratings) and market data (curves, fixings) through the existing import screens; migrate open trades (CSV → booking API); train traders, middle office, risk and operations |
+| **Parallel run** | 1 Feb – 31 Mar | Daily EOD in Nex alongside the client's current process; automated **reconciliation report** (PV, cashflows, positions vs the client's figures) in `batch-reporting`; 2-week pilot sprints releasing through the normal GitOps flow |
+| **Stabilise and evaluate** | 1 – 30 Apr | Fixes only; performance tuning on real volumes; user survey and interviews; case study; Beta go/no-go and scope |
 
-| Phase | Dates | Activities | Output |
-|---|---|---|---|
-| **Onboarding** | 11 – 29 Jan | Load the pilot's static data (counterparties, books, calendars) into the AWS pilot environment; set up users and roles (Keycloak, optional SAML federation with the client's IdP); migrate open trades via CSV import; load historical fixings and curves; training (2 × 2 h: traders, middle office/risk); agree reconciliation tolerances | Pilot live in a dedicated environment; users trained |
-| **Parallel run** | 1 Feb – 31 Mar | The client books trades in Nex and in their current process; daily EOD in Nex; automated **daily reconciliation report** (Nex vs client PV/P&L/cashflows); two-week pilot sprints (P1–P4) shipping fixes and small improvements through `release.yml` | ≥ 20 consecutive business days within tolerance |
-| **Stabilise and evaluate** | 1 – 30 Apr | Bug-fix only; performance tuning on real volumes; pilot survey and interviews; case study; Beta scope and go/no-go workshop | Pilot report, case study, Beta backlog |
+**Feedback loop:**
+- In-app "Feedback" action (header menu), posted to `core-api` with the module, user and trace ID, and forwarded to the issue tracker (`pilot-feedback`).
+- Weekly session with pilot users.
+- Triage: **P1** (blocks booking or EOD) gets a hotfix within 1 business day. **P2** goes into the next pilot sprint. **P3** and enhancements go to the Beta backlog.
+- **KPIs:** reconciliation pass rate, EOD duration, P1/P2 counts, availability, time to book, monthly satisfaction score.
 
-### 9.2 Feedback collection
-
-- **In-app feedback button:** posts to `POST /api/v1/feedback`, stored with the screen, user and trace ID, and forwarded to the issue tracker with the label `pilot-feedback`.
-- **Weekly 45-minute feedback session** with pilot users: a demo of what shipped, then a review of open items.
-- **Triage rules:** P1 (blocks booking/EOD) is fixed within 1 business day with a hotfix release. P2 goes into the next pilot sprint. P3 and enhancements go to the Beta backlog.
-- **Product telemetry** (no personal data): time to book a trade, EOD duration, valuation errors, most-used screens, sent to CloudWatch dashboards.
-- **Pilot KPIs:** reconciliation pass rate, P1/P2 incident count, EOD duration, booking time vs current process, and user satisfaction (1–5) after each month.
-
-### 9.3 Pilot exit criteria
-
-- 20 consecutive business days of reconciliation within the agreed tolerances.
-- No open P1 issues and ≤ 3 open P2 issues.
-- Availability ≥ 99.5% during business hours (06:00–20:00 SAST).
-- The pilot client signs off and the case study is approved. There is a decision on conversion to a paid Starter/Standard subscription.
+**Exit criteria:** 20 consecutive business days of reconciliation within tolerance; no open P1 issues and ≤ 3 open P2 issues; ≥ 99.5% availability in business hours; pilot sign-off; production platform decision (D4).
 
 ---
 
 ## 10. After the pilot (outline)
 
-| Stage | Indicative window | Technical focus |
+| Stage | Window | Focus |
 |---|---|---|
-| **Beta** | May – Sep 2027 | New products (FX forwards, IRS vs JIBAR/ZARONIA, deposits, equities positions); DV01 buckets and historical VaR (Python analytics service); pre-trade limits and maker-checker; vendor market-data feed; event streaming (SNS/SQS or MSK) with an outbox; pooled multi-tenancy; SOC 2 Type I readiness; 2–5 clients |
-| **GA / commercial launch** | Target Q4 2027, confirmed at pilot exit | Tiered packaging and feature flags; self-service tenant provisioning; report designer; SWIFT confirmations through a partner; SOC 2 Type II observation period; AWS Marketplace listing |
-| **Scale** | 2028+ | AI anomaly detection, RPA hooks, further asset classes, EKS if needed, further regions |
+| **Beta** | May – Sep 2027 | Split `market-data-service` and `refdata-service`; event bus; pre-trade limits; vendor market-data feed; historical VaR/stress in the risk engine; pooled multi-tenancy; SOC 2 Type I readiness; 2–5 clients |
+| **GA** | Target Q4 2027 | Tiered packaging and feature flags per module; tenant provisioning; SWIFT confirmations through a partner; SOC 2 Type II; AWS Marketplace listing |
+| **Scale** | 2028+ | AI anomaly detection, RPA hooks, further asset classes and regions |
 
 ---
 
-## 11. Team and responsibilities (MVP)
+## 11. Team
 
 | Role | FTE | Owns |
 |---|---|---|
-| Tech lead / architect | 1 | Architecture, ADRs, code reviews, `api-gateway`, security configuration |
-| Back-end engineer (quant) | 1 | `nex-quant`, `pricing-service`, golden tests |
-| Back-end engineer | 1–2 | `refdata-service`, `trade-service`, `marketdata-service` |
-| Front-end engineer | 1 | `nex-web` wiring, performance, look & feel |
-| DevOps / QA automation | 1 (can be split) | Docker, Terraform, GitHub Actions, Playwright, performance tests |
-| Product owner / BA (part-time) | 0.5 | Scope, acceptance, pilot fixtures, pilot relationship |
-
-**Ceremonies:** 2-week sprints; planning on Monday; demo and retro on the second Friday; daily 15-minute stand-up. The product owner accepts stories in the demo.
+| Tech lead / architect | 1 | Service split, security, ADRs, reviews |
+| Back-end (quant) | 1 | `quant-lib`, `pricing-engine`, golden and regression tests |
+| Back-end | 1–2 | `core-api`, `batch-reporting`, EOD, Flyway |
+| Front-end | 1 | Front-end efficiency, look & feel, Playwright |
+| DevOps | 1 | Jenkins, Terraform, EKS/GitOps overlays, `PLATFORM_STATE.md` |
+| Product owner / BA (part-time) | 0.5 | Scope, acceptance, pilot relationship and fixtures |
 
 ---
 
@@ -801,60 +525,57 @@ Cut in this order, and **never cut** tests, security checks or audit:
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| 12-week MVP window | High | Scope limited to current functionality; cut order in §8.4; the tech lead reviews the burn-down weekly |
-| Pricing correctness (the OIS was removed and is being rebuilt) | High | Golden tests vs QuantLib from S0; start pilot fixture reconciliation in S3; no release without AC4 |
-| Microservice overhead for a small team | Medium | Only 4 domain services; shared `build-logic` and `nex-common`; generated clients; one Compose file; ECS Fargate rather than Kubernetes |
-| AWS account and af-south-1 set-up delays | Medium | Request account/region access in S0; Docker MVP does not depend on AWS; AWS dev may slip to January (§8.4) |
-| Pilot data not received on time | Medium | Synthetic fixtures meanwhile; data request goes out in S0 with a deadline of mid-November |
-| Keycloak operations on AWS | Low–Med | Two ECS tasks, a DB on RDS, realm config in git; Cognito remains the fallback |
-| React app changes break with the new APIs | Medium | Generated TS client, Playwright e2e on every PR |
+| Turning on real auth breaks UI flows | High | S1 authorisation test suite; Playwright on previews; roles mapped 1:1 to existing permission codes |
+| Pricing regressions from moving code into `quant-lib` / `pricing-engine` | High | Behaviour-preserving moves; before/after regression suite on all 17 product types; golden tests |
+| Flyway baseline differs from live databases | Medium | Generate from Hibernate, diff against dev/prod with `pg_dump --schema-only`, dry-run on copies |
+| AWS platform work (EKS, IAM, networking) in 2 weeks | Medium | Terraform modules from S0 in parallel by DevOps; the cut rule in §8.4 moves EKS to January without blocking the MVP |
+| Two platforms (RKE2 + AWS) to run | Medium | Same manifests (base + overlays); decide the production target at pilot exit (D4) |
+| Large front-end components slow down change | Medium | Decompose only with tests in place; no visual changes |
 
 ---
 
-## 13. Decisions to confirm in Sprint 0
+## 13. Decisions to confirm in S0
 
 | ID | Decision | Recommendation |
 |---|---|---|
-| D1 | Identity provider | Keycloak in Docker and AWS (parity, bank SSO); Cognito as the fallback |
-| D2 | AWS container platform | ECS Fargate (EKS reconsidered at Beta) |
-| D3 | Region | af-south-1 for pilot data; dev may use the same region to avoid surprises |
-| D4 | Hosting the React app on AWS | S3 + CloudFront (nginx container only in Docker) |
-| D5 | Persistence style | Spring Data JDBC or JPA per service. Recommend **JDBC/jOOQ** for the trade and pricing schemas because of JSONB and versioning |
-| D6 | Pilot tenancy | Dedicated AWS environment for the pilot; `tenant_id` columns kept for later pooling |
+| D1 | AWS runtime | **EKS + ArgoCD** (keeps GitOps and the manifests); ECS not recommended for this repo |
+| D2 | MVP service split | `core-api` + `pricing-engine` + `batch-reporting`; more splits after the pilot |
+| D3 | GitOps home for AWS overlays | The `ats-capital-markets-gitops` repo (like previews), with ArgoCD apps per AWS environment |
+| D4 | Production platform after the pilot | Decide at pilot exit: move production to AWS, or run AWS for client tenants and RKE2 internally |
+| D5 | ArgoCD for EKS | Register EKS clusters with the existing central ArgoCD (`argocd.alintatechsolutions.co.za`) rather than a new instance |
+| D6 | Pilot tenancy | Dedicated `aws-pilot` environment |
 
 ---
 
-## Appendix A — Local developer quick start
+## Appendix A — Local development
 
 ```bash
-git clone <repo> && cd ATS
-cp deploy/docker/.env.example deploy/docker/.env
-./gradlew build                                   # compile + unit tests
-docker compose -f deploy/docker/docker-compose.yml up -d --build --wait
-open http://localhost:3000                        # React UI (login: trader1 / see .env.example)
-open http://localhost:8081                        # Keycloak admin
-./gradlew :services:trade-service:bootRun --args='--spring.profiles.active=local'   # run one service from the IDE
-cd nex-web && npm ci && npm run dev               # UI with hot reload, proxied to gateway :8080
+# day-to-day (unchanged from CLAUDE.md)
+docker compose up -d postgres redis
+cd backend && SPRING_PROFILES_ACTIVE=local mvn -pl core-api spring-boot:run
+cd frontend && npm install && npm run dev          # http://localhost:5173, proxies /api
+
+# full stack (local integration / CI e2e)
+cp .env.example .env
+docker compose --profile full up -d --build --wait  # http://localhost:3000
+cd frontend && npx playwright test
 ```
 
 ## Appendix B — Conventions
 
-- **Branches:** `main` is protected; feature branches are `feat/<ticket>-short-name` and `fix/...`; PRs are small (under 400 lines changed where possible).
-- **Commits:** Conventional Commits (`feat:`, `fix:`, `chore:`, `test:`, `docs:`).
-- **Versioning:** SemVer tags `vX.Y.Z` for the platform; images tagged with the git SHA plus the release tag.
-- **APIs:** `/api/v1`; breaking changes need `/v2` or additive changes only; dates are ISO-8601 (`yyyy-MM-dd`); money is sent as a string decimal in JSON.
-- **Dates and time:** `LocalDate` for business dates; `Instant`/UTC for timestamps; business centre time zones come from refdata.
-- **Errors:** RFC 7807-style problem JSON with a `traceId`.
-- **Logging:** never log tokens or personal data; include `traceId`, `tenantId`, `userId`.
+- **Branches and PRs:** feature branch → PR → Jenkins PR build → preview `cm-pr<N>` → review → merge. Squash merges.
+- **Tags:** SemVer `vX.Y.Z` for releases; images tagged with the 12-character git SHA; no `latest` in any deployed manifest.
+- **API:** `/api/...` stays compatible for the UI. New internal service-to-service endpoints go under `/internal/...` and need service tokens. ISO-8601 dates.
+- **Logging:** SLF4J JSON with `traceId`, `userId`, `tradeId` where relevant. Never log tokens or personal data.
+- **Platform changes:** always recorded in `docs/PLATFORM_STATE.md`.
 
 ## Appendix C — Glossary
 
 | Term | Meaning |
 |---|---|
-| OIS | Overnight Index Swap: a fixed rate exchanged for a compounded overnight rate (ZARONIA, SOFR) |
-| PV / DV01 | Present value / change in PV for a +1 bp parallel rate move |
-| Snapshot | Immutable set of market data for a business date used by valuations |
-| EOD | End-of-day run: revalue live trades, store results, compute P&L |
-| Golden test | A test comparing Nex output with an independent reference value (QuantLib) |
-| ECS Fargate | AWS serverless container runtime; runs our Docker images without managing servers |
-| PKCE | Proof Key for Code Exchange: the secure OIDC login flow for browser apps |
+| Strangler pattern | Moving functionality out of a monolith step by step while it keeps running |
+| EKS / ECR / RDS / ElastiCache | AWS managed Kubernetes / container registry / PostgreSQL / Redis |
+| IRSA | IAM Roles for Service Accounts: pods get AWS permissions without static keys |
+| ESO | External Secrets Operator: syncs secrets from Vault or AWS Secrets Manager into Kubernetes |
+| ShedLock | Library that makes a scheduled task run on one replica only |
+| Golden test | A test comparing output with an independent reference value |
