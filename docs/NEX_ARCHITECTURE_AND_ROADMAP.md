@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Document** | Technical guide: current state, target architecture, environments, CI/CD, MVP sprint plan, pilot plan |
-| **Version** | v0.3 (24 Sep 2026). Replaces v0.2, which was based on the wrong repository |
+| **Version** | v0.4 (11 Oct 2026): Keycloak cut-over moved to Sprint 4; Sprint 0 progress recorded. v0.3 (24 Sep 2026) replaced v0.2, which was based on the wrong repository |
 | **Codebase** | [`Alintatech-Solutions/ats-capital-markets-app`](https://github.com/Alintatech-Solutions/ats-capital-markets-app), `main` @ `805753b` |
 | **Audience** | Developers, tech lead, DevOps, QA |
 | **Inputs** | *ATS Trading Platform — Investor Business Plan V1.0*; the repository above, including `CLAUDE.md`, `docs/AI_CONTEXT.md`, `docs/PLATFORM_STATE.md` and `docs/FRONTEND_UI_APP_SHELL.md`; product direction from the founders (24 Sep 2026) |
@@ -11,7 +11,17 @@
 
 ---
 
-## 0. What changed in v0.3
+## 0. What changed in v0.4 (11 Oct 2026)
+
+| Topic | v0.3 | **v0.4** |
+|---|---|---|
+| Keycloak cut-over | Sprint 1 | **Sprint 4 (23 Nov – 4 Dec)**, so that testing during S1–S3 is not slowed down by real logins. It must be live before the pilot holds client data (11 Jan) |
+| How the cut-over happens | Remove the bypass in code | The bypass is now a **setting** (`app.security.auth-bypass`, default `true`). The cut-over turns it off per environment: AWS dev first, then pilot. Previews may stay bypassed |
+| Production demo users | Not addressed | **Fixed now:** production no longer seeds `trader1`/`trader2`/`admin1` (password = username) and deactivates any that still have the default password; an optional bootstrap admin comes from a secret (#79) |
+| Sprint 1 | Auth, state, storage | **State, storage and scheduling** (Redis job/session state, ShedLock, S3 report storage, trade audit history) |
+| Sprint 0 | Planned | Mostly delivered (see §8.0) |
+
+## 0.1 What changed in v0.3
 
 v0.1 and v0.2 were written against `Mutwila-Alinta/ATS`, an early Java prototype. This version is based on the actual application, **`ats-capital-markets-app`**. That app is far more advanced, so the plan changes from *building* the MVP to *hardening, splitting and moving* a working application.
 
@@ -30,7 +40,7 @@ v0.1 and v0.2 were written against `Mutwila-Alinta/ATS`, an early Java prototype
 ## 1. Summary for developers
 
 - **MVP (v1.0.0, 18 Dec 2026)** is today's functionality, made secure, durable and scalable. The work:
-  - real Keycloak authentication in place of the auth bypass
+  - real Keycloak authentication in place of the auth bypass (switched on in S4, via a per-environment setting)
   - no in-memory state across replicas
   - a real EOD run in place of the simulated one
   - Flyway-owned schema
@@ -65,7 +75,7 @@ v0.1 and v0.2 were written against `Mutwila-Alinta/ATS`, an early Java prototype
 
 | # | Gap | Evidence | Fix (sprint) |
 |---|---|---|---|
-| G1 | **Authentication is bypassed** | `SecurityConfig.TEMPORARY_AUTH_BYPASS = true` lets anyone call `/api/**`. The OAuth2 resource-server auto-config is excluded in `application.yml`. Dev-login tokens live in an in-memory map (`DevSessionRegistry`) | Turn on Keycloak JWT validation; keep dev login only under the `local` profile (S1) |
+| G1 | **Authentication is bypassed** | `SecurityConfig.TEMPORARY_AUTH_BYPASS = true` lets anyone call `/api/**`. The OAuth2 resource-server auto-config is excluded in `application.yml`. Dev-login tokens live in an in-memory map (`DevSessionRegistry`) | **Now (#79):** bypass is a setting (`app.security.auth-bypass`); production no longer has default-password demo users. **S4:** turn off the bypass per environment (Keycloak JWT); dev login only under `local`/`preview` |
 | G2 | **In-memory state with 2 replicas** | `backend-deployment.yaml` sets `replicas: 2`. State is held in `ConcurrentHashMap`s in `DevSessionRegistry`, `RiskEngineService.jobs`, `BatchController.progress` and `SpringDynamicSchedulerService`. As a result, sessions and jobs are lost between pods, and **scheduled report batches fire on every replica** | Redis for job/session state; ShedLock for schedules (S1) |
 | G3 | **EOD run is simulated** | `BatchController` just loops 0→100% with `Thread.sleep` | Real Spring Batch EOD job (S3) |
 | G4 | **Schema not owned by migrations** | `ddl-auto: update` (default) vs `validate` (prod). Flyway covers only reporting and conventions, so there is no reproducible way to create a production database | Flyway baseline migration for the full schema; `validate` everywhere except local H2 (S0) |
@@ -180,7 +190,7 @@ Each step is its own PR with a preview environment, following the repo's workflo
 ### 4.5 Security
 
 1. **Browser:** unchanged. oidc-client-ts runs Authorization Code + PKCE against Keycloak (`ats-capital-markets` realm, client `capital-markets-web`).
-2. **Services:** remove `TEMPORARY_AUTH_BYPASS` and stop excluding `OAuth2ResourceServerAutoConfiguration`. Enable `oauth2ResourceServer().jwt()`. The existing `keycloakRoleConverter` is extended to map Keycloak realm roles to the **20 existing role codes and 60 permission codes**, so the existing `@PreAuthorize` checks keep working.
+2. **Services:** set `app.security.auth-bypass=false` per environment (done as a setting in #79; the cut-over is in S4). With the bypass off, `oauth2ResourceServer().jwt()` validates Keycloak tokens using a lazily-built JWT decoder. The existing `keycloakRoleConverter` is extended to map Keycloak realm roles to the **20 existing role codes and 60 permission codes**, so the existing `@PreAuthorize` checks keep working.
 3. **Dev login:** `DevTokenAuthenticationFilter` and `/api/auth/login` load only under `@Profile("local")`.
 4. **Service to service:** `batch-reporting` → `pricing-engine` and `core-api` use a Keycloak client-credentials token with the existing `INTEGRATION_SERVICE_ACCOUNT` role.
 5. **Secrets:** Vault + External Secrets on RKE2 (today). On AWS, **AWS Secrets Manager + External Secrets** (`ClusterSecretStore/aws-secrets-manager`) with **IRSA**, so no static keys. Nothing secret in images or git.
@@ -387,10 +397,10 @@ gantt
   axisFormat %d %b
   section MVP build
   S0 Foundations and safety        :s0, 2026-09-28, 2026-10-09
-  S1 Auth, state, storage          :s1, 2026-10-12, 2026-10-23
+  S1 State, storage, scheduling   :s1, 2026-10-12, 2026-10-23
   S2 Extract pricing-engine        :s2, 2026-10-26, 2026-11-06
   S3 batch-reporting + real EOD    :s3, 2026-11-09, 2026-11-20
-  S4 AWS dev (EKS) + UI pass       :s4, 2026-11-23, 2026-12-04
+  S4 Keycloak cut-over, AWS dev    :s4, 2026-11-23, 2026-12-04
   S5 Hardening and release         :s5, 2026-12-07, 2026-12-18
   MVP v1.0.0                       :milestone, m1, 2026-12-18, 1d
   section Freeze
@@ -400,6 +410,20 @@ gantt
   Parallel run + feedback          :p2, 2027-02-01, 2027-03-31
   Stabilise + evaluate             :p3, 2027-04-01, 2027-04-30
 ```
+
+### 8.0 Progress (as of 11 Oct 2026)
+
+| Sprint 0 item | Status |
+|---|---|
+| Plan in the repo | ✅ merged (#73) |
+| Actuator health/metrics, SLF4J logging, 404/405 instead of 500 | ✅ merged (#74) |
+| Flyway baseline (V4) for the Hibernate-managed tables; `validate` in previews | ✅ merged (#75) |
+| Front end: pinned dependencies, Vitest, ESLint, leftovers removed | PR #76 (green) |
+| Jenkins: frontend lint/tests, report-only gitleaks + Trivy scans | PR #77 (first build failed on the agent; investigating) |
+| Spring Boot 3.3.5 → 3.5.16 + patched dependencies (51 → 2 backend findings) | PR #78 (green) |
+| Production demo users removed; auth bypass as a setting | PR #79 (green) |
+| Maven multi-module restructure | Not started; needs a slot agreed with the team (moves every backend file) |
+| Full-stack docker-compose, ADRs | Not started |
 
 ### 8.2 Sprint backlog
 
@@ -413,13 +437,12 @@ gantt
 - Full-stack `docker-compose.yml` (plus Keycloak dev realm and MinIO) for local and CI use.
 - ADRs: 001 service split, 002 EKS + ArgoCD on AWS, 003 Flyway baseline, 004 Redis state, 005 S3 storage.
 
-**S1 — Auth, state and storage (12 – 23 Oct)**
-- Keycloak JWT enabled; `TEMPORARY_AUTH_BYPASS` removed; Keycloak realm roles mapped to the 20 RBAC roles and permission codes; dev login limited to `@Profile("local")`.
-- Authorisation tests per endpoint and role.
+**S1 — State, storage and scheduling (12 – 23 Oct)**
 - Redis-backed job state for the risk engine and batch progress; ShedLock on `SpringDynamicSchedulerService`.
 - `S3FileStorageService` (MinIO locally).
 - `trade_version` audit table, written on every lifecycle action; shown in the blotter's trade history.
 - Playwright smoke in CI against Compose.
+- Keep adding `@PreAuthorize` permission checks to any new endpoint, so the S4 cut-over stays cheap.
 
 **S2 — Extract `pricing-engine` (26 Oct – 6 Nov)**
 - `quant-lib` module (pricing foundation, tools and calculators); `platform-common`.
@@ -434,7 +457,8 @@ gantt
 - Report queries read from persisted EOD results; the dependency graph runs after EOD.
 - Load test: EOD with 10k synthetic trades.
 
-**S4 — AWS dev on EKS and UI pass (23 Nov – 4 Dec)**
+**S4 — Keycloak cut-over, AWS dev on EKS and UI pass (23 Nov – 4 Dec)**
+- **Keycloak cut-over:** map Keycloak realm roles to the 20 RBAC roles and 60 permission codes; set `app.security.auth-bypass=false` on AWS dev, then the pilot environment; dev login only under `local`/`preview`; authorisation tests per endpoint and role; Playwright login flow.
 - Terraform: network, EKS (ALB controller, ESO, IRSA), RDS, ElastiCache, S3, ECR repos, Jenkins IAM role.
 - `aws-dev` Kustomize overlay; ArgoCD application; Secrets Manager entries; `cm-dev` DNS → ALB.
 - `Jenkinsfile.aws` extended (tests, scans, 4 images, GitOps update, no static keys).
@@ -444,7 +468,7 @@ gantt
 **S5 — Hardening and release (7 – 18 Dec)**
 - Full Playwright regression on AWS dev; ZAP baseline; all scan gates green.
 - RDS restore drill; runbooks (deploy/rollback via GitOps revert, EOD failure, Keycloak user admin, incident response).
-- `aws-pilot` environment provisioned (Multi-AZ RDS, 2+ replicas), empty.
+- `aws-pilot` environment provisioned (Multi-AZ RDS, 2+ replicas), empty, **with authentication on** (`app.security.auth-bypass=false`).
 - **Tag `v1.0.0` on 18 Dec 2026**, with release notes and a stakeholder demo.
 
 ### 8.3 MVP acceptance criteria
@@ -463,7 +487,7 @@ gantt
 
 ### 8.4 Scope protection
 
-If a sprint slips, cut in this order. **Never cut** G1–G5 (auth, state, EOD, migrations, storage), tests or security gates.
+If a sprint slips, cut in this order. **Never cut** G1–G5 (auth, state, EOD, migrations, storage), tests or security gates. The Keycloak cut-over (G1) may move from S4 into S5, but never past the pilot start.
 1. Front-end component decomposition (keep code splitting and pinning).
 2. `batch-reporting` stays a module inside `core-api` (the real EOD and ShedLock still ship).
 3. AWS dev on EKS moves to the first two weeks of January. The Docker Compose MVP and the RKE2 preview flow still ship on 18 Dec.
@@ -525,7 +549,8 @@ If a sprint slips, cut in this order. **Never cut** G1–G5 (auth, state, EOD, m
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| Turning on real auth breaks UI flows | High | S1 authorisation test suite; Playwright on previews; roles mapped 1:1 to existing permission codes |
+| Turning on real auth breaks UI flows | High | Cut-over in S4 behind a per-environment setting (AWS dev first, previews can stay bypassed); authorisation test suite; Playwright login flow; roles mapped 1:1 to existing permission codes |
+| Auth cut-over slips past S4 | High | It is a pilot gate: no client data until `auth-bypass=false` on the pilot environment. S5 is the buffer |
 | Pricing regressions from moving code into `quant-lib` / `pricing-engine` | High | Behaviour-preserving moves; before/after regression suite on all 17 product types; golden tests |
 | Flyway baseline differs from live databases | Medium | Generate from Hibernate, diff against dev/prod with `pg_dump --schema-only`, dry-run on copies |
 | AWS platform work (EKS, IAM, networking) in 2 weeks | Medium | Terraform modules from S0 in parallel by DevOps; the cut rule in §8.4 moves EKS to January without blocking the MVP |
